@@ -4,7 +4,8 @@ import Testing
 
 private func win(_ id: Int, app: String = "Safari", space: Int = 1) -> WindowInfo {
     WindowInfo(id: id, appName: app, space: space,
-               isMinimized: false, role: "AXWindow", title: "window \(id)")
+               isMinimized: false, role: "AXWindow", title: "window \(id)",
+               hasAXReference: true)
 }
 
 private struct Harness: @unchecked Sendable {
@@ -231,7 +232,8 @@ struct ActivationLogicTests {
     @Test func cycleSkipsGhostWindows() {
         let h = Harness()
         let ghost = WindowInfo(id: 99, appName: "Safari", space: 1,
-                               isMinimized: false, role: "AXHelpTag", title: "")
+                               isMinimized: false, role: "AXHelpTag", title: "",
+                               hasAXReference: true)
         h.backend.windows = [win(1), win(2), ghost, win(3)]
         h.backend.focusedWin = win(1)
 

@@ -8,8 +8,9 @@ struct WindowInfo {
     let isMinimized: Bool
     let role: String
     let title: String
+    let hasAXReference: Bool
 
-    var isStandardWindow: Bool { role != "AXHelpTag" }
+    var isStandardWindow: Bool { role != "AXHelpTag" && hasAXReference }
 
     /// Parse a WindowInfo from a yabai JSON dictionary.
     static func from(yabaiDict dict: [String: Any]) -> WindowInfo? {
@@ -21,9 +22,11 @@ struct WindowInfo {
         let isMinimized = dict["is-minimized"] as? Int == 1
             || dict["is-minimized"] as? Bool == true
         let role = dict["role"] as? String ?? ""
+        let hasAXRef = dict["has-ax-reference"] as? Int == 1
+            || dict["has-ax-reference"] as? Bool == true
         return WindowInfo(id: id, appName: app, space: space,
                           isMinimized: isMinimized, role: role,
-                          title: title)
+                          title: title, hasAXReference: hasAXRef)
     }
 }
 

@@ -3,7 +3,8 @@ import Testing
 
 private func win(_ id: Int, space: Int = 1) -> WindowInfo {
     WindowInfo(id: id, appName: "App", space: space,
-               isMinimized: false, role: "AXWindow", title: "")
+               isMinimized: false, role: "AXWindow", title: "",
+               hasAXReference: true)
 }
 
 @Suite("Ring Reconciliation")
