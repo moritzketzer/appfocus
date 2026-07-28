@@ -6,6 +6,8 @@ final class FocusPoller {
     private let store: StateStore
     private let config: AppFocusConfig
     private var timer: DispatchSourceTimer?
+    private let inFlightLock = NSLock()
+    private var isPolling = false
 
     init(backend: WindowBackend, store: StateStore, config: AppFocusConfig) {
         self.backend = backend
@@ -31,7 +33,24 @@ final class FocusPoller {
     }
 
     private func poll() {
+        // Guard against overlapping polls: if the previous tick's `yabai`
+        // call hasn't completed yet, skip this tick instead of stacking a
+        // new concurrent call on top of it. Without this, a single slow or
+        // hung call causes one new process to pile up every tick, forever.
+        inFlightLock.lock()
+        guard !isPolling else {
+            inFlightLock.unlock()
+            return
+        }
+        isPolling = true
+        inFlightLock.unlock()
+
         backend.focusedWindow { [self] win in
+            defer {
+                self.inFlightLock.lock()
+                self.isPolling = false
+                self.inFlightLock.unlock()
+            }
             guard let win = win else { return }
             let canonical = self.config.resolveAlias(win.appName)
             self.store.recordFocus(appName: canonical, windowId: win.id, space: win.space)

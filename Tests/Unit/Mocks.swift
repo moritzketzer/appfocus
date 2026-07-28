@@ -8,11 +8,25 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var focusedWindowIds: [Int] = []
     var focusedSpaces: [Int] = []
 
+    /// When true, `focusedWindow` never calls its completion — simulating
+    /// a `yabai` invocation that hangs instead of returning.
+    var focusedWindowHangs = false
+    private let callCountLock = NSLock()
+    private var _focusedWindowCallCount = 0
+    var focusedWindowCallCount: Int {
+        callCountLock.lock(); defer { callCountLock.unlock() }
+        return _focusedWindowCallCount
+    }
+
     func queryAllWindows(completion: @escaping ([WindowInfo]) -> Void) {
         completion(windows)
     }
 
     func focusedWindow(completion: @escaping (WindowInfo?) -> Void) {
+        callCountLock.lock()
+        _focusedWindowCallCount += 1
+        callCountLock.unlock()
+        guard !focusedWindowHangs else { return }
         completion(focusedWin)
     }
 

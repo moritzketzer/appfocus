@@ -5,6 +5,13 @@ final class YabaiBackend: WindowBackend {
     private let yabaiPath: String
     private let queue = DispatchQueue(label: "appfocus.yabai", attributes: .concurrent)
 
+    /// Hard ceiling on how long a single `yabai` invocation may run. Without
+    /// this, a yabai call that never exits leaks its child process forever —
+    /// this is what let ~2553 stuck `yabai -m query` processes pile up in
+    /// production over a few days of uptime.
+    private static let processTimeout: TimeInterval = 3.0
+    private static let killEscalationDelay: TimeInterval = 1.0
+
     init(yabaiPath: String) {
         self.yabaiPath = yabaiPath
     }
@@ -79,12 +86,25 @@ final class YabaiBackend: WindowBackend {
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
 
+            // Both the termination handler and the timeout below can race
+            // to complete — this ensures exactly one of them wins.
+            let finishLock = NSLock()
+            var finished = false
+            let finish: (Data?) -> Void = { data in
+                finishLock.lock()
+                let shouldRun = !finished
+                finished = true
+                finishLock.unlock()
+                guard shouldRun else { return }
+                completion(data)
+            }
+
             process.terminationHandler = { proc in
                 if proc.terminationStatus == 0 {
-                    completion(pipe.fileHandleForReading.readDataToEndOfFile())
+                    finish(pipe.fileHandleForReading.readDataToEndOfFile())
                 } else {
                     Log.debug("yabai \(args.joined(separator: " ")) exited \(proc.terminationStatus)")
-                    completion(nil)
+                    finish(nil)
                 }
             }
 
@@ -92,7 +112,22 @@ final class YabaiBackend: WindowBackend {
                 try process.run()
             } catch {
                 Log.error("yabai exec failed: \(error)")
-                completion(nil)
+                finish(nil)
+                return
+            }
+
+            self.queue.asyncAfter(deadline: .now() + Self.processTimeout) {
+                guard process.isRunning else { return }
+                Log.debug("yabai \(args.joined(separator: " ")) timed out after \(Self.processTimeout)s, terminating")
+                process.terminate()
+
+                self.queue.asyncAfter(deadline: .now() + Self.killEscalationDelay) {
+                    if process.isRunning {
+                        Log.debug("yabai \(args.joined(separator: " ")) ignored SIGTERM, sending SIGKILL")
+                        kill(process.processIdentifier, SIGKILL)
+                    }
+                }
+                finish(nil)
             }
         }
     }
