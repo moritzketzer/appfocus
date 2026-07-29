@@ -99,21 +99,31 @@ final class YabaiBackend: WindowBackend {
                 completion(data)
             }
 
-            process.terminationHandler = { proc in
-                if proc.terminationStatus == 0 {
-                    finish(pipe.fileHandleForReading.readDataToEndOfFile())
-                } else {
-                    Log.debug("yabai \(args.joined(separator: " ")) exited \(proc.terminationStatus)")
-                    finish(nil)
-                }
-            }
-
             do {
                 try process.run()
             } catch {
                 Log.error("yabai exec failed: \(error)")
                 finish(nil)
                 return
+            }
+
+            // Drain the pipe CONCURRENTLY with the running process. Reading only
+            // after the process exits (the old terminationHandler approach)
+            // deadlocks on any output larger than the ~16KB OS pipe buffer:
+            // yabai blocks on write, never exits, the timeout below kills it,
+            // and the query returns nil — surfacing as "running but no windows"
+            // for every app once the desktop has enough windows (a full
+            // `--windows` dump is ~20KB). Draining on a background queue lets
+            // yabai finish writing and exit.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    finish(data)
+                } else {
+                    Log.debug("yabai \(args.joined(separator: " ")) exited \(process.terminationStatus)")
+                    finish(nil)
+                }
             }
 
             self.queue.asyncAfter(deadline: .now() + Self.processTimeout) {
