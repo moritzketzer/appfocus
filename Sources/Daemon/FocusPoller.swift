@@ -52,6 +52,10 @@ final class FocusPoller {
                 self.inFlightLock.unlock()
             }
             guard let win = win else { return }
+            // Never track a non-user-facing window (sticky/floating dialogs like
+            // ChatGPT/Codex overlays). Recording one here is how a dialog would
+            // enter MRU state and become a jump/cycle target.
+            guard win.isStandardWindow else { return }
             let canonical = self.config.resolveAlias(win.appName)
             self.store.recordFocus(appName: canonical, windowId: win.id, space: win.space)
         }

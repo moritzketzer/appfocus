@@ -42,7 +42,9 @@ final class ActivationLogic {
         backend.focusedWindow { [self] focused in
             guard self.isActive(token) else { return }
 
-            if let focused = focused {
+            // Record the pre-jump focused window only if it is a real window;
+            // a focused sticky dialog must not pollute MRU state.
+            if let focused = focused, focused.isStandardWindow {
                 let canonical = self.config.resolveAlias(focused.appName)
                 self.store.recordFocus(appName: canonical, windowId: focused.id, space: focused.space)
             }
@@ -84,7 +86,12 @@ final class ActivationLogic {
 
     private func handleHasWindows(appName: String, windows: [WindowInfo],
                                     focused: WindowInfo?, token: UInt64) {
-        if let focused = focused,
+        // Only treat the app as "already focused" (MRU toggle / cycle) when a
+        // REAL window of it is focused. If a sticky dialog is focused, fall
+        // through to focusBestWindow so the standard window stays reachable
+        // (otherwise the single-real-window case hits mruToggleOrCycle's
+        // count==1 no-op and the standard window becomes unreachable).
+        if let focused = focused, focused.isStandardWindow,
            config.resolveAlias(focused.appName) == appName {
             mruToggleOrCycle(appName: appName, windows: windows,
                              focused: focused, token: token)

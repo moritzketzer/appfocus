@@ -2,10 +2,11 @@
 import Foundation
 import Testing
 
-private func win(_ id: Int, app: String = "Safari", space: Int = 1) -> WindowInfo {
+private func win(_ id: Int, app: String = "Safari", space: Int = 1,
+                 subrole: String = "AXStandardWindow") -> WindowInfo {
     WindowInfo(id: id, appName: app, space: space,
                isMinimized: false, role: "AXWindow", title: "window \(id)",
-               hasAXReference: true)
+               hasAXReference: true, subrole: subrole)
 }
 
 private struct Harness: @unchecked Sendable {
@@ -231,9 +232,11 @@ struct ActivationLogicTests {
 
     @Test func cycleSkipsGhostWindows() {
         let h = Harness()
+        // A tooltip/ghost carries a non-standard subrole, so it is excluded
+        // by the `subrole == AXStandardWindow` eligibility predicate.
         let ghost = WindowInfo(id: 99, appName: "Safari", space: 1,
                                isMinimized: false, role: "AXHelpTag", title: "",
-                               hasAXReference: true)
+                               hasAXReference: true, subrole: "AXUnknown")
         h.backend.windows = [win(1), win(2), ghost, win(3)]
         h.backend.focusedWin = win(1)
 
@@ -386,5 +389,62 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.store.state(for: "Safari").lastFocusedId == 2)
+    }
+
+    // MARK: - Sticky/floating dialog exclusion (Codex/ChatGPT regression)
+
+    @Test func jumpNeverMruSwitchesToTrackedDialog() {
+        // Reproduces prod: prevFocusedId points at a sticky Codex dialog (793).
+        // A dialog must never be an MRU/jump target; jump falls through to a
+        // real window instead.
+        let h = Harness()
+        let real1 = win(786, app: "ChatGPT")
+        let real2 = win(787, app: "ChatGPT")
+        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog")
+        h.backend.windows = [real1, real2, dialog]
+
+        // Pollute MRU so prevFocusedId == 793 (the dialog), lastFocusedId == 786.
+        h.store.recordFocus(appName: "ChatGPT", windowId: 793)
+        h.store.recordFocus(appName: "ChatGPT", windowId: 786)
+
+        h.backend.focusedWin = real1  // focused on the real window 786
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(!h.backend.focusedWindowIds.contains(793))
+        #expect(h.backend.focusedWindowIds.last == 787)
+    }
+
+    @Test func cycleNeverFocusesTrackedDialog() {
+        // Cycling must skip the dialog entirely: wrapping .next from the
+        // highest-id real window lands on the lowest-id REAL window, never the
+        // even-lower-id dialog.
+        let h = Harness()
+        let dialog = win(785, app: "ChatGPT", subrole: "AXDialog")
+        let real1 = win(786, app: "ChatGPT")
+        let real2 = win(787, app: "ChatGPT")
+        h.backend.windows = [dialog, real1, real2]
+        h.backend.focusedWin = real2  // on 787
+
+        h.logic.cycle(direction: .next)  // wraps toward the lowest id
+        h.settle()
+
+        #expect(!h.backend.focusedWindowIds.contains(785))
+        #expect(h.backend.focusedWindowIds.last == 786)
+    }
+
+    @Test func jumpFromFocusedDialogReachesStandardWindow() {
+        // A sticky Codex dialog is the focused window and the app has one real
+        // window. Jump must land on the real window, not no-op on the dialog.
+        let h = Harness()
+        let real = win(786, app: "ChatGPT")
+        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog")
+        h.backend.windows = [real, dialog]
+        h.backend.focusedWin = dialog  // focused ON the sticky dialog
+
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(h.backend.focusedWindowIds.contains(786))
     }
 }

@@ -62,4 +62,34 @@ struct FocusPollerTests {
         #expect(backend.focusedWindowCallCount > 1,
                 "expected polling to continue once each call completes")
     }
+
+    @Test("a focused sticky dialog is never recorded into MRU state")
+    func focusedDialogIsNotRecorded() {
+        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
+        let config = AppFocusConfig(
+            backend: "yabai", yabaiPath: "/usr/bin/true",
+            aliases: [:], reopenStrategies: [:],
+            pollIntervalMs: 100)
+        let backend = MockWindowBackend()
+        // yabai reports a sticky Codex overlay as the focused window.
+        backend.focusedWin = WindowInfo(
+            id: 793, appName: "ChatGPT", space: 6, isMinimized: false,
+            role: "AXWindow", title: "Codex", hasAXReference: true,
+            subrole: "AXDialog")
+        let store = StateStore(stateDir: dir)
+        let poller = FocusPoller(backend: backend, store: store, config: config)
+
+        poller.start()
+        defer { poller.stop() }
+
+        // Let several polls fire; each must skip the dialog.
+        waitUntil(timeout: 5) { backend.focusedWindowCallCount >= 2 }
+
+        // The dialog must never enter MRU state: no cached state, no
+        // recorded lastFocusedId for the app.
+        #expect(store.stateIfCached(for: "ChatGPT") == nil,
+                "a dialog must not create tracked state for its app")
+        #expect(store.state(for: "ChatGPT").lastFocusedId == nil,
+                "a dialog must never become the app's last-focused window")
+    }
 }
