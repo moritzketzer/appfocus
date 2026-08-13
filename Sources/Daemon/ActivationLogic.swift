@@ -158,7 +158,8 @@ final class ActivationLogic {
             }
         }
 
-        guard current?.space != target.space else {
+        if let current, current.isStandardWindow,
+           current.space == target.space {
             focusTarget()
             return
         }

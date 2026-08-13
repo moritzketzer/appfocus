@@ -533,4 +533,20 @@ struct ActivationLogicTests {
 
         #expect(h.backend.focusedWindowIds.contains(786))
     }
+
+    @Test func jumpFromFocusedDialogDoesNotTrustItsReportedSpace() {
+        // Sticky dialogs are visible on every Space but report their home
+        // Space. Matching that stale value must not suppress an explicit
+        // Space transition to the standard target window.
+        let h = Harness()
+        let real = win(786, app: "ChatGPT", space: 7)
+        let dialog = win(793, app: "ChatGPT", space: 7, subrole: "AXDialog")
+        h.backend.windows = [real, dialog]
+        h.backend.focusedWin = dialog
+
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:7", "window:786"])
+    }
 }
