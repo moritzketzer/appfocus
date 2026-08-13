@@ -68,6 +68,41 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowIds.last == 2)
     }
 
+    @Test func jumpAcrossSpacesFocusesSpaceBeforeWindow() {
+        let h = Harness()
+        h.backend.windows = [win(1, space: 2)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:2", "window:1"])
+    }
+
+    @Test func jumpOnSameSpaceFocusesOnlyWindow() {
+        let h = Harness()
+        h.backend.windows = [win(1, space: 1)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["window:1"])
+    }
+
+    @Test func launchedWindowAcrossSpacesFocusesSpaceBeforeWindow() {
+        let h = Harness()
+        h.processChecker.runningApps = []
+        h.backend.windows = []
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+
+        h.logic.jump(appName: "Safari")
+        h.backend.windows = [win(1, space: 2)]
+        h.settle(ms: 2_000_000)
+
+        #expect(h.backend.focusCalls == ["space:2", "window:1"])
+    }
+
     // MARK: - Jump: already focused → cycle
 
     @Test func jumpAlreadyFocusedCyclesToNext() {
@@ -97,6 +132,20 @@ struct ActivationLogicTests {
 
         // Should MRU-switch to window 1 (prev), not window 3 (ring next)
         #expect(h.backend.focusedWindowIds.last == 1)
+    }
+
+    @Test func jumpMruAcrossSpacesFocusesSpaceBeforeWindow() {
+        let h = Harness()
+        h.backend.windows = [win(1, space: 1), win(2, space: 2)]
+        h.backend.focusedWin = win(1, space: 1)
+
+        h.store.recordFocus(appName: "Safari", windowId: 2)
+        h.store.recordFocus(appName: "Safari", windowId: 1)
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:2", "window:2"])
     }
 
     @Test func jumpAlreadyFocusedFallsBackToCycleWhenNoPrev() {
@@ -171,6 +220,43 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.focusedWindowIds.last == 1)
+    }
+
+    @Test func cycleAcrossSpacesFocusesSpaceBeforeWindow() {
+        let h = Harness()
+        h.backend.windows = [win(1, space: 1), win(2, space: 2)]
+        h.backend.focusedWin = win(1, space: 1)
+        h.store.update(appName: "Safari") { state in
+            state.ring = [1, 2]
+        }
+
+        h.logic.cycle(direction: .next)
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:2", "window:2"])
+    }
+
+    @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {
+        let h = Harness()
+        h.backend.focusSpaceCompletesImmediately = false
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.backend.windows = [win(1, app: "Safari", space: 2)]
+
+        h.logic.jump(appName: "Safari")
+        h.backend.windows = [win(2, app: "Code", space: 3)]
+        h.logic.jump(appName: "Code")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:2", "space:3"])
+        guard h.backend.pendingFocusSpaceCompletions.count == 2 else { return }
+
+        h.backend.completeNextFocusSpace()
+        h.settle()
+        #expect(h.backend.focusedWindowIds.isEmpty)
+
+        h.backend.completeNextFocusSpace()
+        h.settle()
+        #expect(h.backend.focusedWindowIds == [2])
     }
 
     @Test func cyclePrevWrapsAround() {

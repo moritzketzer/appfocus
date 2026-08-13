@@ -55,7 +55,8 @@ final class ActivationLogic {
                 guard self.isActive(token) else { return }
 
                 if windows.isEmpty {
-                    self.handleNoWindows(appName: appName, token: token)
+                    self.handleNoWindows(appName: appName, focused: focused,
+                                         token: token)
                 } else {
                     self.handleHasWindows(appName: appName, windows: windows,
                                           focused: focused, token: token)
@@ -64,7 +65,8 @@ final class ActivationLogic {
         }
     }
 
-    private func handleNoWindows(appName: String, token: UInt64) {
+    private func handleNoWindows(appName: String, focused: WindowInfo?,
+                                 token: UInt64) {
         // Check if app is running (has process but no windows)
         let isRunning = processChecker.isAppRunning(name: appName)
 
@@ -73,13 +75,15 @@ final class ActivationLogic {
             let strategy = config.reopenStrategy(for: appName)
             launcher.reopen(appName: appName, strategy: strategy) { [self] in
                 guard self.isActive(token) else { return }
-                self.pollForWindow(appName: appName, token: token)
+                self.pollForWindow(appName: appName, focused: focused,
+                                   token: token)
             }
         } else {
             Log.info("jump: \(appName) not running, launching")
             launcher.launch(appName: appName) { [self] success in
                 guard self.isActive(token), success else { return }
-                self.pollForWindow(appName: appName, token: token)
+                self.pollForWindow(appName: appName, focused: focused,
+                                   token: token)
             }
         }
     }
@@ -96,7 +100,8 @@ final class ActivationLogic {
             mruToggleOrCycle(appName: appName, windows: windows,
                              focused: focused, token: token)
         } else {
-            focusBestWindow(appName: appName, windows: windows)
+            focusBestWindow(appName: appName, windows: windows,
+                            focused: focused, token: token)
         }
     }
 
@@ -113,40 +118,67 @@ final class ActivationLogic {
         if let prevId = state.prevFocusedId, windowIds.contains(prevId) {
             Log.info("jump: \(appName) MRU switch to window \(prevId)")
             store.recordFocus(appName: appName, windowId: prevId)
-            backend.focusWindow(id: prevId) { _ in }
+            if let target = windows.first(where: { $0.id == prevId }) {
+                focusWindow(target, from: focused, token: token)
+            }
         } else {
             Log.info("jump: \(appName) no prev window, cycling next")
             let effectiveId = state.lastFocusedId ?? focused.id
             cycleWithKnownState(appName: appName, windows: windows,
                                 focusedId: effectiveId, direction: .next,
-                                token: token)
+                                current: focused, token: token)
         }
     }
 
-    private func focusBestWindow(appName: String, windows: [WindowInfo]) {
+    private func focusBestWindow(appName: String, windows: [WindowInfo],
+                                 focused: WindowInfo?, token: UInt64) {
         let state = store.state(for: appName)
 
-        let targetId = state.lastFocusedId.flatMap { lastId in
-            windows.first(where: { $0.id == lastId })?.id
-        } ?? windows.first?.id
+        let target = state.lastFocusedId.flatMap { lastId in
+            windows.first(where: { $0.id == lastId })
+        } ?? windows.first
 
-        guard let wid = targetId else {
+        guard let target = target else {
             Log.error("jump: no target window for \(appName)")
             return
         }
 
-        Log.info("jump: focusing window \(wid) for \(appName)")
-        backend.focusWindow(id: wid) { success in
-            if !success {
-                Log.error("jump: yabai focus failed for window \(wid)")
+        Log.info("jump: focusing window \(target.id) for \(appName)")
+        focusWindow(target, from: focused, token: token)
+    }
+
+    private func focusWindow(_ target: WindowInfo, from current: WindowInfo?,
+                             token: UInt64) {
+        let focusTarget = { [self] in
+            guard isActive(token) else { return }
+            backend.focusWindow(id: target.id) { success in
+                if !success {
+                    Log.error("focus: yabai focus failed for window \(target.id)")
+                }
             }
+        }
+
+        guard current?.space != target.space else {
+            focusTarget()
+            return
+        }
+
+        Log.info("focus: switching to space \(target.space) for window \(target.id)")
+        backend.focusSpace(index: target.space) { [self] success in
+            guard isActive(token) else { return }
+            guard success else {
+                Log.error("focus: yabai focus failed for space \(target.space)")
+                return
+            }
+            focusTarget()
         }
     }
 
     private static let windowPollMaxAttempts = 15
     private static let windowPollInterval: TimeInterval = 0.2
 
-    private func pollForWindow(appName: String, token: UInt64,
+    private func pollForWindow(appName: String, focused: WindowInfo?,
+                               token: UInt64,
                                attempt: Int = 0) {
         guard attempt < Self.windowPollMaxAttempts else {
             Log.error("jump: timed out waiting for \(appName) window")
@@ -162,9 +194,10 @@ final class ActivationLogic {
 
                 if let win = windows.first {
                     Log.info("jump: found window for \(appName) after \(attempt + 1) polls")
-                    self.backend.focusWindow(id: win.id) { _ in }
+                    self.focusWindow(win, from: focused, token: token)
                 } else {
-                    self.pollForWindow(appName: appName, token: token,
+                    self.pollForWindow(appName: appName, focused: focused,
+                                       token: token,
                                        attempt: attempt + 1)
                 }
             }
@@ -176,7 +209,7 @@ final class ActivationLogic {
     /// Cycle windows using pre-fetched state. No async calls.
     private func cycleWithKnownState(appName: String, windows: [WindowInfo],
                                       focusedId: Int, direction: CycleDirection,
-                                      token: UInt64) {
+                                      current: WindowInfo, token: UInt64) {
         guard isActive(token) else { return }
         guard windows.count > 1 else {
             Log.info("cycle: only \(windows.count) window(s)")
@@ -197,7 +230,9 @@ final class ActivationLogic {
 
         Log.info("cycle: \(currentIdx) -> \(nextIdx) of \(ring.count) (window \(nextId))")
         store.recordFocus(appName: appName, windowId: nextId)
-        backend.focusWindow(id: nextId) { _ in }
+        if let target = windows.first(where: { $0.id == nextId }) {
+            focusWindow(target, from: current, token: token)
+        }
     }
 
     func cycle(direction: CycleDirection) {
@@ -217,7 +252,7 @@ final class ActivationLogic {
                 let windows = self.windowsForApp(appName, from: allWindows)
                 self.cycleWithKnownState(appName: appName, windows: windows,
                                           focusedId: focused.id, direction: direction,
-                                          token: token)
+                                          current: focused, token: token)
             }
         }
     }
