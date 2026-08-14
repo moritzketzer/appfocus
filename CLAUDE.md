@@ -29,8 +29,9 @@ Sources/
     KanataCommandSource.swift — TCP server: parses kanata push-msg JSON envelopes
     SocketCommandSource.swift — Unix socket server: accepts CLI connections
     ActivationLogic.swift    — Core brain: jump (MRU toggle, launch, reopen), cycle (ring-based)
+    WindowModel.swift        — In-memory window snapshot + focused id; commands read this, not yabai
     StateStore.swift         — Per-app persistent state: MRU IDs, ring order, JSON on disk
-    FocusPoller.swift        — Background timer: polls focused window, records to StateStore
+    FocusPoller.swift        — Background timer: full window snapshot into WindowModel + MRU recording
     AppLauncher.swift        — Launch (open -a) and reopen (osascript) with per-app strategies
     ProcessChecker.swift     — NSWorkspace.shared.runningApplications lookup
     Config.swift             — JSON config from ~/.config/appfocus/config.json
@@ -54,13 +55,26 @@ Protocol-based design with two extension points:
 - **CommandSource** protocol — how commands arrive (kanata TCP, Unix socket CLI)
 - **WindowBackend** protocol — how windows are queried and focused (yabai)
 
-Flow: CommandSource → ActivationLogic → WindowBackend + AppLauncher + StateStore
+Flow: CommandSource → ActivationLogic → WindowModel (read) + WindowBackend (act) + AppLauncher + StateStore
+
+**Read/act split:** commands never query yabai on the hot path. FocusPoller
+rebuilds the in-memory WindowModel from one full `queryAllWindows` snapshot
+per tick (default 2 s, first tick immediate); jump/cycle read the model and
+issue only focus actions. Completed focus actions update the model
+optimistically so serialized bursts compound. The single deliberate live
+query left is the confirm on the "no windows for a running app" branch (a
+stale empty read there would reopen a duplicate window). Staleness bound:
+one poll interval; a vanished target fails cleanly and self-heals at the
+next poll.
 
 ActivationLogic is the core brain. It handles:
 - **jump**: focus app's best window (MRU), launch if not running, reopen if no windows
 - **MRU toggle**: double-jump same app switches to previous window
 - **cycle**: ring-based next/prev within an app's windows
 - **cancellation tokens**: last-write-wins for overlapping async commands
+- **watchdog + one-shot retry**: a command stuck >3s is force-dropped (pump
+  never wedges); if its focus target was already resolved, the focus action
+  replays once after the backoff unless a newer command supersedes it
 
 Native macOS APIs complement yabai: `open -a` for launching, osascript for reopening, NSWorkspace for process detection.
 
@@ -76,7 +90,7 @@ Native macOS APIs complement yabai: `open -a` for launching, osascript for reope
 | reopen_strategies | {"*": "reopen"} | Per-app: reopen, makeWindow, makeDocument |
 | kanata_enabled | true | Enable kanata TCP source |
 | kanata_port | 7070 | TCP port for kanata push-msg |
-| poll_interval_ms | 1000 | FocusPoller interval |
+| poll_interval_ms | 2000 | WindowModel snapshot poll interval |
 
 ## Testing
 
