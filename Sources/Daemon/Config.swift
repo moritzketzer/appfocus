@@ -25,7 +25,7 @@ struct AppFocusConfig: Codable {
         yabaiPath: "/etc/profiles/per-user/\(NSUserName())/bin/yabai",
         aliases: [:],
         reopenStrategies: ["*": .reopen],
-        pollIntervalMs: 1000,
+        pollIntervalMs: 2000,
         kanataEnabled: true,
         kanataPort: 7070
     )
@@ -70,7 +70,7 @@ extension AppFocusConfig {
         yabaiPath = try c.decode(String.self, forKey: .yabaiPath)
         aliases = try c.decodeIfPresent([String: String].self, forKey: .aliases) ?? [:]
         reopenStrategies = try c.decodeIfPresent([String: ReopenStrategy].self, forKey: .reopenStrategies) ?? ["*": .reopen]
-        pollIntervalMs = try c.decodeIfPresent(Int.self, forKey: .pollIntervalMs) ?? 1000
+        pollIntervalMs = try c.decodeIfPresent(Int.self, forKey: .pollIntervalMs) ?? 2000
         kanataEnabled = try c.decodeIfPresent(Bool.self, forKey: .kanataEnabled) ?? true
         kanataPort = try c.decodeIfPresent(Int.self, forKey: .kanataPort) ?? 7070
     }

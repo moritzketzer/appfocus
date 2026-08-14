@@ -39,6 +39,14 @@ struct ConfigTests {
         #expect(config.resolveAlias("A") == "B")
     }
 
+    // MARK: - Poll interval default
+
+    @Test func pollIntervalDefaultsTo2000() {
+        // Full-snapshot polls replaced the old per-second focus ping; the
+        // default interval doubled to keep steady-state yabai load low.
+        #expect(AppFocusConfig.default.pollIntervalMs == 2000)
+    }
+
     // MARK: - Reopen strategy
 
     @Test func reopenStrategySpecific() {
