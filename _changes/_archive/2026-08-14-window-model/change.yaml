@@ -1,4 +1,5 @@
 created: 2026-08-14
+status: archived
 history:
   - date: 2026-08-14
     event: created
@@ -32,3 +33,11 @@ history:
     session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
     tool: claude-code
     branch: change/window-model
+  - date: 2026-08-14
+    event: completed
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+  - date: 2026-08-14
+    event: archived
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
