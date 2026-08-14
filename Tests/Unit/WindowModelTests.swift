@@ -31,4 +31,33 @@ struct WindowModelTests {
         ]
         #expect(WindowInfo.from(yabaiDict: dict)?.hasFocus == false)
     }
+
+    @Test func replaceSnapshotDerivesFocusedIdFromHasFocus() {
+        let store = WindowModelStore()
+        store.replaceSnapshot([win(1), win(2, hasFocus: true)])
+        let m = store.snapshot()
+        #expect(m.focusedId == 2)
+        #expect(m.windows.count == 2)
+        #expect(store.focusedWindow?.id == 2)
+    }
+
+    @Test func replaceSnapshotWithNoFocusedWindowYieldsNil() {
+        let store = WindowModelStore()
+        store.replaceSnapshot([win(1)])
+        #expect(store.snapshot().focusedId == nil)
+    }
+
+    @Test func noteFocusedOverridesSnapshotFocus() {
+        let store = WindowModelStore()
+        store.replaceSnapshot([win(1, hasFocus: true), win(2)])
+        store.noteFocused(id: 2)
+        #expect(store.focusedWindow?.id == 2)
+    }
+
+    @Test func generationBumpsOnEveryRebuild() {
+        let store = WindowModelStore()
+        let g0 = store.snapshot().generation
+        store.replaceSnapshot([win(1)])
+        #expect(store.snapshot().generation == g0 + 1)
+    }
 }
