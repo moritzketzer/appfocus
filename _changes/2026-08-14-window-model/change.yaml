@@ -1,0 +1,21 @@
+created: 2026-08-14
+history:
+  - date: 2026-08-14
+    event: created
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+  - date: 2026-08-14
+    event: spec-written
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+  - date: 2026-08-14
+    event: ship-authorized
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+    publication: bundled
+    reason: >-
+      Standalone `ship` after Moritz approved the presented design and locked
+      all five open decisions ("do each as you recommend. then ship." followed
+      by exact `ship`). Full lane; same session continues through plan,
+      implementation, review, and deploy in this worktree, so the spec rides
+      the final wt-finish.
