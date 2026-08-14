@@ -236,6 +236,61 @@ struct ActivationLogicTests {
         #expect(h.backend.focusCalls == ["space:2", "window:2"])
     }
 
+    @Test func rapidRepeatedCycleCommandsAreHandledInOrder() {
+        let h = Harness()
+        h.backend.windows = [win(1), win(2), win(3)]
+        h.backend.focusedWin = win(1)
+        h.backend.focusedWindowCompletesImmediately = false
+        h.backend.focusWindowUpdatesFocusedWin = true
+        h.store.update(appName: "Safari") { state in
+            state.ring = [1, 2, 3]
+        }
+
+        let presses = 12
+        for _ in 0..<presses {
+            h.logic.cycle(direction: .next)
+        }
+
+        for _ in 0..<presses {
+            #expect(h.backend.completeNextFocusedWindow())
+            h.settle(ms: 20_000)
+        }
+        h.settle()
+
+        // Every response above contained a real focused window. Losing any
+        // action therefore means input was superseded, not that yabai failed.
+        #expect(h.backend.focusedWindowCallCount == presses)
+        #expect(h.backend.focusedWindowIds.count == presses)
+        #expect(h.backend.focusedWindowIds.last == 1)
+    }
+
+    @Test func rapidRepeatedJumpCommandsAreHandledInOrder() {
+        let h = Harness()
+        h.backend.windows = [win(1, app: "cmux"), win(2, app: "cmux")]
+        h.backend.focusedWin = win(1, app: "cmux")
+        h.backend.focusedWindowCompletesImmediately = false
+        h.backend.focusWindowUpdatesFocusedWin = true
+        h.processChecker.runningApps.insert("cmux")
+        h.store.update(appName: "cmux") { state in
+            state.ring = [1, 2]
+        }
+
+        let presses = 8
+        for _ in 0..<presses {
+            h.logic.jump(appName: "cmux")
+        }
+
+        for _ in 0..<presses {
+            #expect(h.backend.completeNextFocusedWindow())
+            h.settle(ms: 20_000)
+        }
+        h.settle()
+
+        #expect(h.backend.focusedWindowCallCount == presses)
+        #expect(h.backend.focusedWindowIds.count == presses)
+        #expect(h.backend.focusedWindowIds.last == 1)
+    }
+
     @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {
         let h = Harness()
         h.backend.focusSpaceCompletesImmediately = false

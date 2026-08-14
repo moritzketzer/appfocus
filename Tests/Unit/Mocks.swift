@@ -10,6 +10,9 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var focusCalls: [String] = []
     var focusSpaceCompletesImmediately = true
     var pendingFocusSpaceCompletions: [(Bool) -> Void] = []
+    var focusedWindowCompletesImmediately = true
+    var pendingFocusedWindowCompletions: [(WindowInfo?) -> Void] = []
+    var focusWindowUpdatesFocusedWin = false
 
     /// When true, `focusedWindow` never calls its completion — simulating
     /// a `yabai` invocation that hangs instead of returning.
@@ -30,12 +33,20 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
         _focusedWindowCallCount += 1
         callCountLock.unlock()
         guard !focusedWindowHangs else { return }
-        completion(focusedWin)
+        if focusedWindowCompletesImmediately {
+            completion(focusedWin)
+        } else {
+            pendingFocusedWindowCompletions.append(completion)
+        }
     }
 
     func focusWindow(id: Int, completion: @escaping (Bool) -> Void) {
         focusedWindowIds.append(id)
         focusCalls.append("window:\(id)")
+        if focusWindowUpdatesFocusedWin,
+           let target = windows.first(where: { $0.id == id }) {
+            focusedWin = target
+        }
         completion(true)
     }
 
@@ -51,6 +62,13 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
 
     func completeNextFocusSpace(success: Bool = true) {
         pendingFocusSpaceCompletions.removeFirst()(success)
+    }
+
+    @discardableResult
+    func completeNextFocusedWindow() -> Bool {
+        guard !pendingFocusedWindowCompletions.isEmpty else { return false }
+        pendingFocusedWindowCompletions.removeFirst()(focusedWin)
+        return true
     }
 }
 
