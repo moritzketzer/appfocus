@@ -15,10 +15,12 @@ let backend = YabaiBackend(yabaiPath: config.yabaiPath)
 let launcher = DefaultAppLauncher()
 let store = StateStore()
 let processChecker = WorkspaceProcessChecker(config: config)
+let model = WindowModelStore()
 let logic = ActivationLogic(config: config, backend: backend,
                              launcher: launcher, store: store,
-                             processChecker: processChecker)
-let poller = FocusPoller(backend: backend, store: store, config: config)
+                             processChecker: processChecker, model: model)
+let poller = FocusPoller(backend: backend, store: store, config: config,
+                          model: model)
 
 // Ensure state directory exists
 try? FileManager.default.createDirectory(

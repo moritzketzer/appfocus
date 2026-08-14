@@ -4,11 +4,12 @@ import Testing
 
 private func win(_ id: Int, app: String = "Safari", space: Int = 1,
                  subrole: String = "AXStandardWindow",
-                 sticky: Bool = false, floating: Bool = false) -> WindowInfo {
+                 sticky: Bool = false, floating: Bool = false,
+                 hasFocus: Bool = false) -> WindowInfo {
     WindowInfo(id: id, appName: app, space: space,
                isMinimized: false, role: "AXWindow", title: "window \(id)",
                hasAXReference: true, subrole: subrole,
-               isSticky: sticky, isFloating: floating)
+               isSticky: sticky, isFloating: floating, hasFocus: hasFocus)
 }
 
 /// Deterministic xorshift RNG so the property test is reproducible (a failing
@@ -28,6 +29,7 @@ private struct Harness: @unchecked Sendable {
     let backend: MockWindowBackend
     let launcher: MockAppLauncher
     let store: StateStore
+    let model: WindowModelStore
     let processChecker: MockProcessChecker
     let logic: ActivationLogic
 
@@ -37,21 +39,39 @@ private struct Harness: @unchecked Sendable {
         let config = AppFocusConfig(
             backend: "yabai", yabaiPath: "/usr/bin/true",
             aliases: aliases, reopenStrategies: strategies,
-            pollIntervalMs: 1000)
+            pollIntervalMs: 2000)
         backend = MockWindowBackend()
         launcher = MockAppLauncher()
         store = StateStore(stateDir: dir)
+        model = WindowModelStore()
         processChecker = MockProcessChecker()
         // All apps default to "running" so existing tests keep working
         processChecker.runningApps = ["Safari", "Visual Studio Code", "Other"]
         logic = ActivationLogic(config: config, backend: backend,
                                  launcher: launcher, store: store,
-                                 processChecker: processChecker)
+                                 processChecker: processChecker,
+                                 model: model)
         // Disable the hung-yabai watchdog by default: tests that defer mock
         // completions hold a command "running" for the test's duration, which
         // under parallel execution can exceed the production deadline and let
         // the watchdog force-release mid-test. Watchdog tests opt back in.
         logic.commandDeadline = 3600
+    }
+
+    /// Simulate one background poll tick: the model absorbs the backend's
+    /// current windows, with focusedWin marked as the focused one.
+    func sync() {
+        var wins = backend.windows
+        if let f = backend.focusedWin {
+            wins.removeAll { $0.id == f.id }
+            wins.append(WindowInfo(id: f.id, appName: f.appName, space: f.space,
+                                   isMinimized: f.isMinimized, role: f.role,
+                                   title: f.title,
+                                   hasAXReference: f.hasAXReference,
+                                   subrole: f.subrole, isSticky: f.isSticky,
+                                   isFloating: f.isFloating, hasFocus: true))
+        }
+        model.replaceSnapshot(wins)
     }
 
     /// Wait for async GCD callbacks to settle.
@@ -63,12 +83,99 @@ private struct Harness: @unchecked Sendable {
 @Suite("ActivationLogic")
 struct ActivationLogicTests {
 
+    // MARK: - Query-free hot path
+
+    @Test func jumpWithWindowsInModelIssuesNoQueries() {
+        let h = Harness()
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusedWindowIds.contains(1))
+    }
+
+    @Test func jumpWithEmptyModelConfirmsOnceBeforeReopening() {
+        // Model knows nothing, but yabai actually has windows: the confirm
+        // query must find them and focus — never reopen a duplicate.
+        let h = Harness()
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = nil
+        // model NOT synced — stays empty
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.launcher.reopenedApps.isEmpty)
+        #expect(h.backend.focusedWindowIds.contains(1))
+    }
+
+    @Test func jumpConfirmedNoWindowsReopens() {
+        let h = Harness()
+        h.processChecker.runningApps = ["Safari"]
+        h.backend.windows = []
+        h.sync()
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount >= 1)
+        #expect(h.launcher.reopenedApps.count == 1)
+    }
+
+    @Test func staleModelTargetGoneFromBackendFailsCleanly() {
+        // The model still believes window 5 exists after it closed. The
+        // command must complete cleanly and leave the pump idle; the next
+        // poll heals the model.
+        let h = Harness()
+        h.backend.windows = [win(5)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+        h.backend.windows = []  // window vanished after the last poll
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.logic.isIdleForTesting)
+    }
+
+    @Test func cycleIssuesNoQueries() {
+        let h = Harness()
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+        h.store.update(appName: "Safari") { $0.ring = [1, 2] }
+
+        h.logic.cycle(direction: .next)
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusedWindowIds.last == 2)
+    }
+
+    @Test func cycleWithNoFocusInModelLogsAndCompletes() {
+        let h = Harness()
+        h.backend.windows = [win(1), win(2)]
+        h.sync()  // nothing focused
+
+        h.logic.cycle(direction: .next)
+        h.settle()
+
+        #expect(h.backend.focusedWindowIds.isEmpty)
+        #expect(h.logic.isIdleForTesting)
+    }
+
     // MARK: - Jump: focus existing window
 
     @Test func jumpFocusesExistingWindow() {
         let h = Harness()
         h.backend.windows = [win(1), win(2)]
         h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -81,6 +188,7 @@ struct ActivationLogicTests {
         h.store.recordFocus(appName: "Safari", windowId: 2)
         h.backend.windows = [win(1), win(2), win(3)]
         h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -92,6 +200,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1, space: 2)]
         h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -103,6 +212,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1, space: 1)]
         h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -115,6 +225,7 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = []
         h.backend.windows = []
         h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.backend.windows = [win(1, space: 2)]
@@ -131,6 +242,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -143,6 +255,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2), win(3)]
         h.backend.focusedWin = win(2)
+        h.sync()
 
         // Simulate: user was on window 1, then switched to window 2
         h.store.recordFocus(appName: "Safari", windowId: 1)
@@ -160,6 +273,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1, space: 1), win(2, space: 2)]
         h.backend.focusedWin = win(1, space: 1)
+        h.sync()
 
         h.store.recordFocus(appName: "Safari", windowId: 2)
         h.store.recordFocus(appName: "Safari", windowId: 1)
@@ -175,6 +289,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2), win(3)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2, 3]
@@ -191,6 +306,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -204,6 +320,7 @@ struct ActivationLogicTests {
         let h = Harness(aliases: ["Code": "Visual Studio Code"])
         h.backend.windows = [win(1, app: "Visual Studio Code")]
         h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
 
         h.logic.jump(appName: "Visual Studio Code")
         h.settle()
@@ -214,11 +331,12 @@ struct ActivationLogicTests {
     // MARK: - Jump: alias filtering at ActivationLogic level
 
     @Test func jumpResolvesAliasFromAllWindows() {
-        // Backend returns all windows including aliased app name "Code"
-        // ActivationLogic must resolve "Code" → "Visual Studio Code" via config alias
+        // The model holds windows under the aliased app name "Code";
+        // ActivationLogic must resolve "Code" → "Visual Studio Code".
         let h = Harness(aliases: ["Code": "Visual Studio Code"])
         h.backend.windows = [win(1, app: "Code"), win(2, app: "Code")]
         h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
 
         h.logic.jump(appName: "Visual Studio Code")
         h.settle()
@@ -233,6 +351,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2)]
         h.backend.focusedWin = win(2)
+        h.sync()
 
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2]
@@ -248,6 +367,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1, space: 1), win(2, space: 2)]
         h.backend.focusedWin = win(1, space: 1)
+        h.sync()
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2]
         }
@@ -262,8 +382,8 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2), win(3)]
         h.backend.focusedWin = win(1)
-        h.backend.focusedWindowCompletesImmediately = false
-        h.backend.focusWindowUpdatesFocusedWin = true
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2, 3]
         }
@@ -274,14 +394,14 @@ struct ActivationLogicTests {
         }
 
         for _ in 0..<presses {
-            #expect(h.backend.completeNextFocusedWindow())
+            #expect(h.backend.completeNextFocusWindow())
             h.settle(ms: 20_000)
         }
         h.settle()
 
-        // Every response above contained a real focused window. Losing any
-        // action therefore means input was superseded, not that yabai failed.
-        #expect(h.backend.focusedWindowCallCount == presses)
+        // 12 presses from window 1 over ring [1,2,3]: every press must land,
+        // in order, ending where a full 4x loop ends. What compounds each
+        // press is the optimistic model update on the previous completion.
         #expect(h.backend.focusedWindowIds.count == presses)
         #expect(h.backend.focusedWindowIds.last == 1)
     }
@@ -290,8 +410,8 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1, app: "cmux"), win(2, app: "cmux")]
         h.backend.focusedWin = win(1, app: "cmux")
-        h.backend.focusedWindowCompletesImmediately = false
-        h.backend.focusWindowUpdatesFocusedWin = true
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
         h.processChecker.runningApps.insert("cmux")
         h.store.update(appName: "cmux") { state in
             state.ring = [1, 2]
@@ -303,14 +423,14 @@ struct ActivationLogicTests {
         }
 
         for _ in 0..<presses {
-            #expect(h.backend.completeNextFocusedWindow())
+            #expect(h.backend.completeNextFocusWindow())
             h.settle(ms: 20_000)
         }
         h.settle()
 
-        #expect(h.backend.focusedWindowCallCount == presses)
         #expect(h.backend.focusedWindowIds.count == presses)
         #expect(h.backend.focusedWindowIds.last == 1)
+        #expect(h.backend.queryAllWindowsCallCount == 0)
     }
 
     // MARK: - Resilience to a hung/slow yabai
@@ -322,9 +442,10 @@ struct ActivationLogicTests {
         h.logic.hungBackoff = 0.0        // no backoff, so the retry is never dropped
         h.backend.windows = [win(1), win(2)]
         h.backend.focusedWin = win(1)
-        h.backend.focusedWindowCompletesImmediately = false  // first command hangs
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false  // focus action hangs
 
-        h.logic.jump(appName: "Safari")   // wedges on focusedWindow (running, no completion)
+        h.logic.jump(appName: "Safari")   // wedges on the focus action
         h.settle(ms: 50_000)
 
         // Fire the watchdog as the real timer would once the deadline passes.
@@ -332,7 +453,7 @@ struct ActivationLogicTests {
 
         // yabai "recovers": a fresh jump must run, proving the pump was released
         // and not left wedged behind the hung command.
-        h.backend.focusedWindowCompletesImmediately = true
+        h.backend.focusWindowCompletesImmediately = true
         h.logic.jump(appName: "Safari")
         h.settle()
         #expect(!h.backend.focusedWindowIds.isEmpty)
@@ -346,31 +467,33 @@ struct ActivationLogicTests {
         h.logic.maxPending = 3
         h.backend.windows = [win(1, app: "cmux"), win(2, app: "cmux")]
         h.backend.focusedWin = win(1, app: "cmux")
-        h.backend.focusedWindowCompletesImmediately = false
-        h.backend.focusWindowUpdatesFocusedWin = true
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
         h.processChecker.runningApps.insert("cmux")
 
         for _ in 0..<10 { h.logic.jump(appName: "cmux") }
 
         var drained = 0
-        while h.backend.completeNextFocusedWindow() {
+        while h.backend.completeNextFocusWindow() {
             h.settle(ms: 20_000); drained += 1
             if drained > 20 { break }
         }
         h.settle()
-        #expect(h.backend.focusedWindowCallCount == 1 + h.logic.maxPending)
+        #expect(h.backend.focusedWindowIds.count == 1 + h.logic.maxPending)
     }
 
     @Test func pumpStaysConsistentUnderRandomCommandSequences() {
         // Property test: for many random command sequences (jump across apps,
-        // next, prev) with focusedWindow deferred to force queuing/superseding/
-        // interleaving, once every deferred completion drains and the watchdog
-        // fires, the pump must (a) return to idle — never permanently wedged —
-        // and (b) never have focused a window that doesn't exist.
+        // next, prev) with the focus action deferred to force queuing/
+        // superseding/interleaving, once every deferred completion drains and
+        // the watchdog fires, the pump must (a) return to idle — never
+        // permanently wedged — and (b) never have focused a window that
+        // doesn't exist.
         var rng = FuzzRNG(seed: 0xA11CE_5EED)
         let apps = ["cmux", "Safari", "ChatGPT"]
         for _ in 0..<150 {
             let h = Harness()
+            h.logic.hungBackoff = 0.0
             var wins: [WindowInfo] = []
             for (i, app) in apps.enumerated() {
                 wins.append(win(i * 10 + 1, app: app, space: i + 1))
@@ -378,8 +501,8 @@ struct ActivationLogicTests {
             }
             h.backend.windows = wins
             h.backend.focusedWin = wins.first
-            h.backend.focusedWindowCompletesImmediately = false
-            h.backend.focusWindowUpdatesFocusedWin = true
+            h.sync()
+            h.backend.focusWindowCompletesImmediately = false
             for app in apps { h.processChecker.runningApps.insert(app) }
 
             let commands = Int.random(in: 1...12, using: &rng)
@@ -389,16 +512,22 @@ struct ActivationLogicTests {
                 case 2: h.logic.cycle(direction: .next)
                 default: h.logic.cycle(direction: .prev)
                 }
-                // Sometimes resolve an in-flight yabai call mid-sequence.
-                if Bool.random(using: &rng) { _ = h.backend.completeNextFocusedWindow() }
+                // Sometimes resolve an in-flight focus action mid-sequence.
+                if Bool.random(using: &rng) { _ = h.backend.completeNextFocusWindow() }
             }
 
-            // Drain everything, fire the watchdog for any straggler, drain again.
+            // Drain everything, fire the watchdog for any straggler, then
+            // drain until the pump settles (a one-shot retry may still submit
+            // after the backoff) — condition-polled, not a fixed worst-case
+            // sleep, so the 150 iterations stay fast.
             var guardN = 0
-            while h.backend.completeNextFocusedWindow() { guardN += 1; if guardN > 500 { break } }
+            while h.backend.completeNextFocusWindow() { guardN += 1; if guardN > 500 { break } }
             h.logic.fireWatchdogNowForTesting()
-            while h.backend.completeNextFocusedWindow() { guardN += 1; if guardN > 1000 { break } }
-            h.settle(ms: 20_000)
+            var waited = 0
+            while !h.logic.isIdleForTesting && waited < 60 {
+                _ = h.backend.completeNextFocusWindow()
+                usleep(10_000); waited += 1
+            }
 
             #expect(h.logic.isIdleForTesting, "pump must return to idle, never wedge")
             let validIds = Set(wins.map { $0.id })
@@ -409,12 +538,13 @@ struct ActivationLogicTests {
 
     @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {
         let h = Harness()
-        h.backend.focusSpaceCompletesImmediately = false
+        h.backend.windows = [win(1, app: "Safari", space: 2),
+                             win(2, app: "Code", space: 3)]
         h.backend.focusedWin = win(99, app: "Other", space: 1)
-        h.backend.windows = [win(1, app: "Safari", space: 2)]
+        h.sync()
+        h.backend.focusSpaceCompletesImmediately = false
 
         h.logic.jump(appName: "Safari")
-        h.backend.windows = [win(2, app: "Code", space: 3)]
         h.logic.jump(appName: "Code")
         h.settle()
 
@@ -434,6 +564,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2]
@@ -451,16 +582,19 @@ struct ActivationLogicTests {
         h.backend.windows = [win(1), win(2), win(3)]
 
         h.backend.focusedWin = win(1)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
 
         h.backend.focusedWin = win(2)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 3)
 
         h.backend.focusedWin = win(3)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 1)
@@ -472,16 +606,19 @@ struct ActivationLogicTests {
         h.backend.windows = [win(1), win(2), win(3)]
 
         h.backend.focusedWin = win(3)
+        h.sync()
         h.logic.cycle(direction: .prev)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
 
         h.backend.focusedWin = win(2)
+        h.sync()
         h.logic.cycle(direction: .prev)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 1)
 
         h.backend.focusedWin = win(1)
+        h.sync()
         h.logic.cycle(direction: .prev)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 3)
@@ -489,25 +626,28 @@ struct ActivationLogicTests {
 
     @Test func cycleSkipsGhostWindows() {
         let h = Harness()
-        // A tooltip/ghost carries a non-standard subrole, so it is excluded
-        // by the `subrole == AXStandardWindow` eligibility predicate.
+        // A tooltip/ghost carries a non-standard role, so it is excluded by
+        // the isStandardWindow eligibility predicate.
         let ghost = WindowInfo(id: 99, appName: "Safari", space: 1,
                                isMinimized: false, role: "AXHelpTag", title: "",
                                hasAXReference: true, subrole: "AXUnknown")
         h.backend.windows = [win(1), win(2), ghost, win(3)]
-        h.backend.focusedWin = win(1)
 
         // Should cycle 1 → 2 → 3 → 1, skipping AXHelpTag ghost window 99
+        h.backend.focusedWin = win(1)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
 
         h.backend.focusedWin = win(2)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 3)
 
         h.backend.focusedWin = win(3)
+        h.sync()
         h.logic.cycle(direction: .next)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 1)
@@ -517,6 +657,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.logic.cycle(direction: .next)
         h.settle()
@@ -531,6 +672,7 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = []  // nothing running
         h.backend.windows = []
         h.backend.focusedWin = nil
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -543,6 +685,7 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = ["Safari"]
         h.backend.windows = []
         h.backend.focusedWin = nil
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -556,6 +699,7 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = ["Safari"]
         h.backend.windows = []
         h.backend.focusedWin = nil
+        h.sync()
 
         h.logic.jump(appName: "Safari")
         h.settle()
@@ -576,6 +720,7 @@ struct ActivationLogicTests {
 
         // First jump while on window 2 → should go to window 1
         h.backend.focusedWin = win(2)
+        h.sync()
         h.logic.jump(appName: "Safari")
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 1)
@@ -585,6 +730,7 @@ struct ActivationLogicTests {
 
         // Second jump while on window 1 → should go back to window 2
         h.backend.focusedWin = win(1)
+        h.sync()
         h.logic.jump(appName: "Safari")
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
@@ -598,6 +744,7 @@ struct ActivationLogicTests {
         // Start on window 1
         h.store.recordFocus(appName: "Safari", windowId: 1)
         h.backend.focusedWin = win(1)
+        h.sync()
 
         // Cycle next: 1 → 2
         h.logic.cycle(direction: .next)
@@ -606,12 +753,14 @@ struct ActivationLogicTests {
 
         // Cycle prev: 2 → 1
         h.backend.focusedWin = win(2)
+        h.sync()
         h.logic.cycle(direction: .prev)
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 1)
 
         // Now MRU jump while on window 1 — should go to 2 (prev from cycling)
         h.backend.focusedWin = win(1)
+        h.sync()
         h.logic.jump(appName: "Safari")
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
@@ -624,6 +773,7 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = []
         h.backend.windows = []
         h.backend.focusedWin = nil
+        h.sync()
 
         h.logic.jump(appName: "Code")
         h.settle()
@@ -637,6 +787,7 @@ struct ActivationLogicTests {
         let h = Harness()
         h.backend.windows = [win(1), win(2), win(3)]
         h.backend.focusedWin = win(1)
+        h.sync()
 
         h.store.update(appName: "Safari") { state in
             state.ring = [1, 2, 3]
@@ -666,6 +817,7 @@ struct ActivationLogicTests {
         h.store.recordFocus(appName: "ChatGPT", windowId: 786)
 
         h.backend.focusedWin = real1  // focused on the real window 786
+        h.sync()
         h.logic.jump(appName: "ChatGPT")
         h.settle()
 
@@ -684,6 +836,7 @@ struct ActivationLogicTests {
         let real2 = win(787, app: "ChatGPT")
         h.backend.windows = [dialog, real1, real2]
         h.backend.focusedWin = real2  // on 787
+        h.sync()
 
         h.logic.cycle(direction: .next)  // wraps toward the lowest id
         h.settle()
@@ -701,6 +854,7 @@ struct ActivationLogicTests {
                          sticky: true, floating: true)
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog  // focused ON the sticky dialog
+        h.sync()
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
@@ -718,6 +872,7 @@ struct ActivationLogicTests {
                          sticky: true, floating: true)
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog
+        h.sync()
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()

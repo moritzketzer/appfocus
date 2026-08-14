@@ -8,6 +8,7 @@ final class ActivationLogic {
     private let launcher: AppLauncher
     private let store: StateStore
     private let processChecker: ProcessChecker
+    private let model: WindowModelStore
 
     /// Serial queue guarding the command pump's mutable state
     /// (`currentToken`, `running`, `runningApp`, `pending`).
@@ -60,12 +61,13 @@ final class ActivationLogic {
 
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
-         processChecker: ProcessChecker) {
+         processChecker: ProcessChecker, model: WindowModelStore) {
         self.config = config
         self.backend = backend
         self.launcher = launcher
         self.store = store
         self.processChecker = processChecker
+        self.model = model
     }
 
     // MARK: - Command pump (in-order serialization)
@@ -230,29 +232,44 @@ final class ActivationLogic {
 
     private func performJump(appName: String, token: UInt64,
                              done: @escaping () -> Void) {
-        // Step 1: Get fresh focus state before proceeding
-        backend.focusedWindow { [self] focused in
+        // Read the model — no yabai round-trip on the hot path. A stalled
+        // WindowServer now only delays the background refresh, never a press.
+        let focused = model.focusedWindow
+
+        // Record the pre-jump focused window only if it is a real window;
+        // a focused sticky dialog must not pollute MRU state.
+        if let focused = focused, focused.isStandardWindow {
+            let canonical = config.resolveAlias(focused.appName)
+            store.recordFocus(appName: canonical, windowId: focused.id,
+                              space: focused.space)
+        }
+
+        let windows = windowsForApp(appName, from: model.snapshot().windows)
+        if windows.isEmpty {
+            confirmNoWindows(appName: appName, focused: focused,
+                             token: token, done: done)
+        } else {
+            handleHasWindows(appName: appName, windows: windows,
+                             focused: focused, token: token, done: done)
+        }
+    }
+
+    /// The one deliberately fresh read: a stale "no windows" would reopen a
+    /// duplicate window (the Safari-reopen bug class), so this rare branch
+    /// pays for a live query and feeds the result back into the model.
+    private func confirmNoWindows(appName: String, focused: WindowInfo?,
+                                  token: UInt64, done: @escaping () -> Void) {
+        backend.queryAllWindows { [self] all in
             guard self.isActive(token) else { done(); return }
-
-            // Record the pre-jump focused window only if it is a real window;
-            // a focused sticky dialog must not pollute MRU state.
-            if let focused = focused, focused.isStandardWindow {
-                let canonical = self.config.resolveAlias(focused.appName)
-                self.store.recordFocus(appName: canonical, windowId: focused.id, space: focused.space)
-            }
-
-            // Step 2: Query windows for the target app
-            self.backend.queryAllWindows { allWindows in
-                guard self.isActive(token) else { done(); return }
-                let windows = self.windowsForApp(appName, from: allWindows)
-
-                if windows.isEmpty {
-                    self.handleNoWindows(appName: appName, focused: focused,
-                                         token: token, done: done)
-                } else {
-                    self.handleHasWindows(appName: appName, windows: windows,
-                                          focused: focused, token: token, done: done)
-                }
+            if !all.isEmpty { self.model.replaceSnapshot(all) }
+            let windows = self.windowsForApp(appName, from: all)
+            if windows.isEmpty {
+                self.handleNoWindows(appName: appName, focused: focused,
+                                     token: token, done: done)
+            } else {
+                Log.info("jump: confirm found \(windows.count) window(s) for \(appName)")
+                self.handleHasWindows(appName: appName, windows: windows,
+                                      focused: focused, token: token, done: done)
             }
         }
     }
@@ -349,7 +366,11 @@ final class ActivationLogic {
         let focusTarget = { [self] in
             guard isActive(token) else { done(); return }
             backend.focusWindow(id: target.id) { success in
-                if !success {
+                if success {
+                    // Read-your-writes: the next queued command must see the
+                    // settled focus without a query, so bursts compound.
+                    self.model.noteFocused(id: target.id)
+                } else {
                     Log.error("focus: yabai focus failed for window \(target.id)")
                 }
                 done()
@@ -388,6 +409,7 @@ final class ActivationLogic {
             guard self.isActive(token) else { done(); return }
 
             self.backend.queryAllWindows { allWindows in
+                if !allWindows.isEmpty { self.model.replaceSnapshot(allWindows) }
                 let windows = self.windowsForApp(appName, from: allWindows)
                 guard self.isActive(token) else { done(); return }
 
@@ -445,28 +467,18 @@ final class ActivationLogic {
 
     private func performCycle(direction: CycleDirection, token: UInt64,
                               done: @escaping () -> Void) {
-        backend.focusedWindow { [self] focused in
-            // Separate supersession from a genuinely missing focused window:
-            // a superseded command is expected and silent, whereas a nil
-            // focused window is a real yabai state worth logging. Conflating
-            // them (the old combined guard) made every superseded cycle log
-            // "cycle: no focused window".
-            guard self.isActive(token) else { done(); return }
-            guard let focused = focused else {
-                Log.error("cycle: no focused window")
-                done(); return
-            }
-
-            let appName = self.config.resolveAlias(focused.appName)
-
-            self.backend.queryAllWindows { allWindows in
-                guard self.isActive(token) else { done(); return }
-                let windows = self.windowsForApp(appName, from: allWindows)
-                self.cycleWithKnownState(appName: appName, windows: windows,
-                                          focusedId: focused.id, direction: direction,
-                                          current: focused, token: token, done: done)
-            }
+        // Model read only — no yabai queries. The pump has already settled
+        // the previous command's focus into the model (optimistic update).
+        guard let focused = model.focusedWindow else {
+            Log.error("cycle: no focused window")
+            done(); return
         }
+
+        let appName = config.resolveAlias(focused.appName)
+        let windows = windowsForApp(appName, from: model.snapshot().windows)
+        cycleWithKnownState(appName: appName, windows: windows,
+                            focusedId: focused.id, direction: direction,
+                            current: focused, token: token, done: done)
     }
 
     enum CycleDirection: String {

@@ -2,94 +2,73 @@
 import Foundation
 import Testing
 
-/// Polls `condition` instead of sleeping a fixed duration, so timer-driven
-/// assertions don't flake under machine load — where a fixed sleep can
-/// under- or over-shoot how many ticks actually fired.
-private func waitUntil(timeout: TimeInterval, condition: () -> Bool) {
-    let deadline = Date().addingTimeInterval(timeout)
-    while !condition() && Date() < deadline {
-        usleep(10_000)
-    }
+private func win(_ id: Int, app: String = "Safari", space: Int = 1,
+                 sticky: Bool = false, subrole: String = "AXStandardWindow",
+                 hasFocus: Bool = false) -> WindowInfo {
+    WindowInfo(id: id, appName: app, space: space,
+               isMinimized: false, role: "AXWindow", title: "w\(id)",
+               hasAXReference: true, subrole: subrole,
+               isSticky: sticky, isFloating: sticky, hasFocus: hasFocus)
 }
 
 @Suite("FocusPoller")
 struct FocusPollerTests {
 
-    @Test("does not fire a new poll while the previous one is still in flight")
-    func singleFlightWhenBackendHangs() {
-        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
+    private func makePoller() -> (MockWindowBackend, StateStore, WindowModelStore, FocusPoller) {
+        let backend = MockWindowBackend()
+        let store = StateStore(stateDir: NSTemporaryDirectory() + "appfocus-poll-\(UUID().uuidString)")
+        let model = WindowModelStore()
         let config = AppFocusConfig(
             backend: "yabai", yabaiPath: "/usr/bin/true",
-            aliases: [:], reopenStrategies: [:],
-            pollIntervalMs: 100)
-        let backend = MockWindowBackend()
-        backend.focusedWindowHangs = true
-        let store = StateStore(stateDir: dir)
-        let poller = FocusPoller(backend: backend, store: store, config: config)
-
-        poller.start()
-        defer { poller.stop() }
-
-        waitUntil(timeout: 5) { backend.focusedWindowCallCount >= 1 }
-        #expect(backend.focusedWindowCallCount == 1, "expected the first poll to start")
-
-        // Give many more tick intervals worth of time. Without the
-        // single-flight guard, an unguarded timer stacks a new call on
-        // top of every prior hung one — the exact mechanism that leaked
-        // ~2553 stuck `yabai -m query` processes in production.
-        usleep(600_000)
-        #expect(backend.focusedWindowCallCount == 1,
-                "expected exactly one in-flight poll, got \(backend.focusedWindowCallCount)")
+            aliases: ["Code": "Visual Studio Code"],
+            reopenStrategies: [:], pollIntervalMs: 2000)
+        let poller = FocusPoller(backend: backend, store: store,
+                                 config: config, model: model)
+        return (backend, store, model, poller)
     }
 
-    @Test("resumes polling once the in-flight call completes")
-    func resumesAfterInFlightCallCompletes() {
-        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
-        let config = AppFocusConfig(
-            backend: "yabai", yabaiPath: "/usr/bin/true",
-            aliases: [:], reopenStrategies: [:],
-            pollIntervalMs: 100)
-        let backend = MockWindowBackend()
-        let store = StateStore(stateDir: dir)
-        let poller = FocusPoller(backend: backend, store: store, config: config)
+    @Test func pollRebuildsModelAndRecordsMru() {
+        let (backend, store, model, poller) = makePoller()
+        backend.windows = [win(1), win(2, hasFocus: true)]
 
-        poller.start()
-        defer { poller.stop() }
+        poller.pollOnce()
 
-        // Backend completes immediately here, so the guard must not
-        // wedge polling shut — several ticks should still get through.
-        waitUntil(timeout: 5) { backend.focusedWindowCallCount > 1 }
-        #expect(backend.focusedWindowCallCount > 1,
-                "expected polling to continue once each call completes")
+        #expect(model.snapshot().windows.count == 2)
+        #expect(model.focusedWindow?.id == 2)
+        #expect(store.state(for: "Safari").lastFocusedId == 2)
     }
 
-    @Test("a focused sticky dialog is never recorded into MRU state")
-    func focusedDialogIsNotRecorded() {
-        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
-        let config = AppFocusConfig(
-            backend: "yabai", yabaiPath: "/usr/bin/true",
-            aliases: [:], reopenStrategies: [:],
-            pollIntervalMs: 100)
-        let backend = MockWindowBackend()
-        // yabai reports a sticky Codex overlay as the focused window.
-        backend.focusedWin = WindowInfo(
-            id: 793, appName: "ChatGPT", space: 6, isMinimized: false,
-            role: "AXWindow", title: "Codex", hasAXReference: true,
-            subrole: "AXDialog", isSticky: true, isFloating: true)
-        let store = StateStore(stateDir: dir)
-        let poller = FocusPoller(backend: backend, store: store, config: config)
+    @Test func pollDoesNotRecordFocusedStickyDialog() {
+        let (backend, store, model, poller) = makePoller()
+        backend.windows = [win(1),
+                           win(9, sticky: true, subrole: "AXDialog", hasFocus: true)]
 
-        poller.start()
-        defer { poller.stop() }
+        poller.pollOnce()
 
-        // Let several polls fire; each must skip the dialog.
-        waitUntil(timeout: 5) { backend.focusedWindowCallCount >= 2 }
+        // The dialog IS the model's focused window (commands guard on it),
+        // but it must never enter MRU state.
+        #expect(model.snapshot().focusedId == 9)
+        #expect(store.stateIfCached(for: "Safari")?.lastFocusedId == nil)
+    }
 
-        // The dialog must never enter MRU state: no cached state, no
-        // recorded lastFocusedId for the app.
-        #expect(store.stateIfCached(for: "ChatGPT") == nil,
-                "a dialog must not create tracked state for its app")
-        #expect(store.state(for: "ChatGPT").lastFocusedId == nil,
-                "a dialog must never become the app's last-focused window")
+    @Test func pollResolvesAliasWhenRecordingMru() {
+        let (backend, store, _, poller) = makePoller()
+        backend.windows = [win(3, app: "Code", hasFocus: true)]
+
+        poller.pollOnce()
+
+        #expect(store.state(for: "Visual Studio Code").lastFocusedId == 3)
+    }
+
+    @Test func emptyQueryKeepsLastGoodModel() {
+        let (backend, _, model, poller) = makePoller()
+        backend.windows = [win(1, hasFocus: true)]
+        poller.pollOnce()
+        backend.windows = []   // transient yabai failure yields []
+
+        poller.pollOnce()
+
+        #expect(model.snapshot().windows.count == 1)
+        #expect(model.focusedWindow?.id == 1)
     }
 }

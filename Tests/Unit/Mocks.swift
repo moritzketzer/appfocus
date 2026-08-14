@@ -10,44 +10,48 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var focusCalls: [String] = []
     var focusSpaceCompletesImmediately = true
     var pendingFocusSpaceCompletions: [(Bool) -> Void] = []
-    var focusedWindowCompletesImmediately = true
-    var pendingFocusedWindowCompletions: [(WindowInfo?) -> Void] = []
-    var focusWindowUpdatesFocusedWin = false
+    var focusWindowCompletesImmediately = true
+    var pendingFocusWindowCompletions: [(Bool) -> Void] = []
+    var queryAllWindowsCompletesImmediately = true
+    var pendingQueryAllWindowsCompletions: [([WindowInfo]) -> Void] = []
 
-    /// When true, `focusedWindow` never calls its completion — simulating
-    /// a `yabai` invocation that hangs instead of returning.
-    var focusedWindowHangs = false
     private let callCountLock = NSLock()
-    private var _focusedWindowCallCount = 0
-    var focusedWindowCallCount: Int {
+    private var _queryAllWindowsCallCount = 0
+    var queryAllWindowsCallCount: Int {
         callCountLock.lock(); defer { callCountLock.unlock() }
-        return _focusedWindowCallCount
+        return _queryAllWindowsCallCount
     }
 
     func queryAllWindows(completion: @escaping ([WindowInfo]) -> Void) {
-        completion(windows)
+        callCountLock.lock()
+        _queryAllWindowsCallCount += 1
+        callCountLock.unlock()
+        if queryAllWindowsCompletesImmediately {
+            completion(windows)
+        } else {
+            pendingQueryAllWindowsCompletions.append(completion)
+        }
+    }
+
+    @discardableResult
+    func completeNextQueryAllWindows() -> Bool {
+        guard !pendingQueryAllWindowsCompletions.isEmpty else { return false }
+        pendingQueryAllWindowsCompletions.removeFirst()(windows)
+        return true
     }
 
     func focusedWindow(completion: @escaping (WindowInfo?) -> Void) {
-        callCountLock.lock()
-        _focusedWindowCallCount += 1
-        callCountLock.unlock()
-        guard !focusedWindowHangs else { return }
-        if focusedWindowCompletesImmediately {
-            completion(focusedWin)
-        } else {
-            pendingFocusedWindowCompletions.append(completion)
-        }
+        completion(focusedWin)
     }
 
     func focusWindow(id: Int, completion: @escaping (Bool) -> Void) {
         focusedWindowIds.append(id)
         focusCalls.append("window:\(id)")
-        if focusWindowUpdatesFocusedWin,
-           let target = windows.first(where: { $0.id == id }) {
-            focusedWin = target
+        if focusWindowCompletesImmediately {
+            completion(true)
+        } else {
+            pendingFocusWindowCompletions.append(completion)
         }
-        completion(true)
     }
 
     func focusSpace(index: Int, completion: @escaping (Bool) -> Void) {
@@ -65,9 +69,9 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     }
 
     @discardableResult
-    func completeNextFocusedWindow() -> Bool {
-        guard !pendingFocusedWindowCompletions.isEmpty else { return false }
-        pendingFocusedWindowCompletions.removeFirst()(focusedWin)
+    func completeNextFocusWindow(success: Bool = true) -> Bool {
+        guard !pendingFocusWindowCompletions.isEmpty else { return false }
+        pendingFocusWindowCompletions.removeFirst()(success)
         return true
     }
 }

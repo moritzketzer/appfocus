@@ -1,30 +1,39 @@
 // Sources/Daemon/FocusPoller.swift
 import Foundation
 
+/// Background bootstrap loop for the WindowModel: one full queryAllWindows
+/// snapshot per tick rebuilds the model and records MRU focus state. This is
+/// the ONLY steady-state yabai query in the daemon — commands read the model.
+/// A stalled query delays the invisible refresh, never a keypress.
 final class FocusPoller {
     private let backend: WindowBackend
     private let store: StateStore
     private let config: AppFocusConfig
+    private let model: WindowModelStore
     private var timer: DispatchSourceTimer?
     private let inFlightLock = NSLock()
     private var isPolling = false
 
-    init(backend: WindowBackend, store: StateStore, config: AppFocusConfig) {
+    init(backend: WindowBackend, store: StateStore, config: AppFocusConfig,
+         model: WindowModelStore) {
         self.backend = backend
         self.store = store
         self.config = config
+        self.model = model
     }
 
     func start() {
         let interval = DispatchTimeInterval.milliseconds(max(100, config.pollIntervalMs))
         let t = DispatchSource.makeTimerSource(queue: .global())
-        t.schedule(deadline: .now() + interval, repeating: interval)
+        // First tick immediately: commands issued right after daemon start
+        // should find a populated model instead of paying the confirm query.
+        t.schedule(deadline: .now(), repeating: interval)
         t.setEventHandler { [weak self] in
-            self?.poll()
+            self?.pollOnce()
         }
         t.resume()
         timer = t
-        Log.info("Focus poller started (\(config.pollIntervalMs)ms interval)")
+        Log.info("Snapshot poller started (\(config.pollIntervalMs)ms interval)")
     }
 
     func stop() {
@@ -32,11 +41,10 @@ final class FocusPoller {
         timer = nil
     }
 
-    private func poll() {
-        // Guard against overlapping polls: if the previous tick's `yabai`
-        // call hasn't completed yet, skip this tick instead of stacking a
-        // new concurrent call on top of it. Without this, a single slow or
-        // hung call causes one new process to pile up every tick, forever.
+    /// One poll tick. Internal (not private) so tests drive it directly
+    /// without real timers. Guarded against overlap: a slow or hung query
+    /// skips ticks instead of stacking concurrent yabai processes.
+    func pollOnce() {
         inFlightLock.lock()
         guard !isPolling else {
             inFlightLock.unlock()
@@ -45,19 +53,24 @@ final class FocusPoller {
         isPolling = true
         inFlightLock.unlock()
 
-        backend.focusedWindow { [self] win in
+        backend.queryAllWindows { [self] windows in
             defer {
                 self.inFlightLock.lock()
                 self.isPolling = false
                 self.inFlightLock.unlock()
             }
-            guard let win = win else { return }
-            // Never track a non-user-facing window (sticky/floating dialogs like
-            // ChatGPT/Codex overlays). Recording one here is how a dialog would
-            // enter MRU state and become a jump/cycle target.
-            guard win.isStandardWindow else { return }
-            let canonical = self.config.resolveAlias(win.appName)
-            self.store.recordFocus(appName: canonical, windowId: win.id, space: win.space)
+            // A failed query yields [] — keep the last good model rather
+            // than wiping it on a transient yabai stall.
+            guard !windows.isEmpty else { return }
+            self.model.replaceSnapshot(windows)
+            // Never track a non-user-facing window (sticky/floating dialogs
+            // like ChatGPT/Codex overlays). Recording one here is how a
+            // dialog would enter MRU state and become a jump/cycle target.
+            guard let focused = windows.first(where: { $0.hasFocus }),
+                  focused.isStandardWindow else { return }
+            let canonical = self.config.resolveAlias(focused.appName)
+            self.store.recordFocus(appName: canonical, windowId: focused.id,
+                                   space: focused.space)
         }
     }
 }
