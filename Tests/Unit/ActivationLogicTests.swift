@@ -143,6 +143,25 @@ struct ActivationLogicTests {
         #expect(h.logic.isIdleForTesting)
     }
 
+    @Test func confirmQueryFailureNeverReopens() {
+        // A FAILED confirm query (yabai error/timeout → nil) must not be
+        // read as "no windows": reopening on it would create a duplicate
+        // window. The press is dropped; the pump stays healthy.
+        let h = Harness()
+        h.processChecker.runningApps = ["Safari"]
+        h.backend.windows = [win(1)]
+        h.backend.queryAllWindowsFails = true
+        // model empty → confirm path → failure
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.launcher.reopenedApps.isEmpty)
+        #expect(h.launcher.launchedApps.isEmpty)
+        #expect(h.backend.focusedWindowIds.isEmpty)
+        #expect(h.logic.isIdleForTesting)
+    }
+
     @Test func cycleIssuesNoQueries() {
         let h = Harness()
         h.backend.windows = [win(1), win(2)]

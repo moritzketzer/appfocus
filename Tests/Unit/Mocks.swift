@@ -13,7 +13,9 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var focusWindowCompletesImmediately = true
     var pendingFocusWindowCompletions: [(Bool) -> Void] = []
     var queryAllWindowsCompletesImmediately = true
-    var pendingQueryAllWindowsCompletions: [([WindowInfo]) -> Void] = []
+    var pendingQueryAllWindowsCompletions: [([WindowInfo]?) -> Void] = []
+    /// When true, queryAllWindows reports FAILURE (nil), not an empty list.
+    var queryAllWindowsFails = false
 
     private let callCountLock = NSLock()
     private var _queryAllWindowsCallCount = 0
@@ -22,12 +24,12 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
         return _queryAllWindowsCallCount
     }
 
-    func queryAllWindows(completion: @escaping ([WindowInfo]) -> Void) {
+    func queryAllWindows(completion: @escaping ([WindowInfo]?) -> Void) {
         callCountLock.lock()
         _queryAllWindowsCallCount += 1
         callCountLock.unlock()
         if queryAllWindowsCompletesImmediately {
-            completion(windows)
+            completion(queryAllWindowsFails ? nil : windows)
         } else {
             pendingQueryAllWindowsCompletions.append(completion)
         }
@@ -36,7 +38,7 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     @discardableResult
     func completeNextQueryAllWindows() -> Bool {
         guard !pendingQueryAllWindowsCompletions.isEmpty else { return false }
-        pendingQueryAllWindowsCompletions.removeFirst()(windows)
+        pendingQueryAllWindowsCompletions.removeFirst()(queryAllWindowsFails ? nil : windows)
         return true
     }
 

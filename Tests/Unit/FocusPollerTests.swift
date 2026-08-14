@@ -60,15 +60,30 @@ struct FocusPollerTests {
         #expect(store.state(for: "Visual Studio Code").lastFocusedId == 3)
     }
 
-    @Test func emptyQueryKeepsLastGoodModel() {
+    @Test func failedQueryKeepsLastGoodModel() {
         let (backend, _, model, poller) = makePoller()
         backend.windows = [win(1, hasFocus: true)]
         poller.pollOnce()
-        backend.windows = []   // transient yabai failure yields []
+        backend.queryAllWindowsFails = true   // transient yabai failure (nil)
 
         poller.pollOnce()
 
         #expect(model.snapshot().windows.count == 1)
         #expect(model.focusedWindow?.id == 1)
+    }
+
+    @Test func genuinelyEmptySnapshotWipesModel() {
+        // A successful query returning zero windows is trustworthy: ghost
+        // windows must leave the model, or jump keeps dead-ending on them
+        // instead of taking the confirm/reopen path.
+        let (backend, _, model, poller) = makePoller()
+        backend.windows = [win(1, hasFocus: true)]
+        poller.pollOnce()
+        backend.windows = []   // desktop genuinely has zero windows
+
+        poller.pollOnce()
+
+        #expect(model.snapshot().windows.isEmpty)
+        #expect(model.focusedWindow == nil)
     }
 }

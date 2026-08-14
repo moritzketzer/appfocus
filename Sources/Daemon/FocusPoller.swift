@@ -59,9 +59,11 @@ final class FocusPoller {
                 self.isPolling = false
                 self.inFlightLock.unlock()
             }
-            // A failed query yields [] — keep the last good model rather
-            // than wiping it on a transient yabai stall.
-            guard !windows.isEmpty else { return }
+            // A FAILED query (nil) keeps the last good model rather than
+            // wiping it on a transient yabai stall. A genuinely empty dump
+            // is trustworthy and must be accepted, or ghost windows stay in
+            // the model forever once the desktop reaches zero windows.
+            guard let windows = windows else { return }
             self.model.replaceSnapshot(windows)
             // Never track a non-user-facing window (sticky/floating dialogs
             // like ChatGPT/Codex overlays). Recording one here is how a

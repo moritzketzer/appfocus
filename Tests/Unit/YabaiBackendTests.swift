@@ -111,7 +111,7 @@ struct YabaiBackendTests {
         var count = -1
 
         backend.queryAllWindows { windows in
-            count = windows.count
+            count = windows?.count ?? -2   // -2 = query reported failure
             sem.signal()
         }
 

@@ -10,7 +10,6 @@ struct WindowModel {
     var windows: [WindowInfo] = []
     var focusedId: Int? = nil
     var generation: UInt64 = 0
-    var lastRefresh: DispatchTime = .now()
 }
 
 /// Thread-safe holder. Writers: FocusPoller (snapshot rebuild) and
@@ -26,13 +25,16 @@ final class WindowModelStore {
     }
 
     /// Full rebuild from a fresh queryAllWindows dump. focusedId is derived
-    /// from yabai's has-focus flag.
+    /// from yabai's has-focus flag. Accepted race: a poll whose query
+    /// straddles a focus action can briefly roll the optimistic focusedId
+    /// back to the pre-action value (exposure = the query's duration; the
+    /// next poll or press corrects it). Fencing this with timestamps is not
+    /// worth the complexity for a tens-of-ms window.
     func replaceSnapshot(_ windows: [WindowInfo]) {
         lock.lock(); defer { lock.unlock() }
         model.windows = windows
         model.focusedId = windows.first(where: { $0.hasFocus })?.id
         model.generation &+= 1
-        model.lastRefresh = .now()
     }
 
     /// Optimistic read-your-writes update after appfocus committed a focus

@@ -106,12 +106,18 @@ final class ActivationLogic {
     /// command that continues navigating the same context (`next`/`prev`, or a
     /// `jump` to the same app) is never a stale-focus hazard, so it queues and
     /// compounds instead of being discarded.
-    private func submit(app: String?,
+    private func submit(app: String?, userInitiated: Bool = true,
                         _ run: @escaping (UInt64, @escaping () -> Void) -> Void) {
         let job = PumpJob(app: app, run: run)
         var start: (UInt64, PumpJob)?
         var action = ""
         activationQueue.sync {
+            // A fresh user command expresses newer intent than any armed
+            // retry. Clearing INSIDE this critical section (not in a separate
+            // sync before submit) closes the race where a watchdog fire
+            // interleaves between clear and breaker-check and revives a stale
+            // target against the newer press.
+            if userInitiated { pendingRetry = nil }
             // Circuit breaker: if a recent command timed out on yabai, drop new
             // commands briefly instead of hammering the still-hung backend.
             if DispatchTime.now() < hungUntil {
@@ -212,7 +218,7 @@ final class ActivationLogic {
             pendingRetry = nil
         }
         guard let retry else { return }  // cancelled by a newer user command
-        submit(app: retry.appName) { [self] token, done in
+        submit(app: retry.appName, userInitiated: false) { [self] token, done in
             let windows = self.model.snapshot().windows
             guard let target = windows.first(where: { $0.id == retry.windowId }),
                   target.isStandardWindow, !target.isMinimized else {
@@ -280,8 +286,6 @@ final class ActivationLogic {
 
     func jump(appName rawName: String) {
         let appName = config.resolveAlias(rawName)
-        // A fresh user command expresses newer intent than any armed retry.
-        activationQueue.sync { pendingRetry = nil }
         submit(app: appName) { [self] token, done in
             Log.info("jump: \(appName)")
             self.performJump(appName: appName, token: token, done: done)
@@ -290,9 +294,13 @@ final class ActivationLogic {
 
     private func performJump(appName: String, token: UInt64,
                              done: @escaping () -> Void) {
-        // Read the model — no yabai round-trip on the hot path. A stalled
+        // Read the model ONCE — no yabai round-trip on the hot path, and no
+        // torn read across a concurrent poller rebuild. A stalled
         // WindowServer now only delays the background refresh, never a press.
-        let focused = model.focusedWindow
+        let snapshot = model.snapshot()
+        let focused = snapshot.focusedId.flatMap { id in
+            snapshot.windows.first(where: { $0.id == id })
+        }
 
         // Record the pre-jump focused window only if it is a real window;
         // a focused sticky dialog must not pollute MRU state.
@@ -302,7 +310,7 @@ final class ActivationLogic {
                               space: focused.space)
         }
 
-        let windows = windowsForApp(appName, from: model.snapshot().windows)
+        let windows = windowsForApp(appName, from: snapshot.windows)
         if windows.isEmpty {
             confirmNoWindows(appName: appName, focused: focused,
                              token: token, done: done)
@@ -319,7 +327,14 @@ final class ActivationLogic {
                                   token: UInt64, done: @escaping () -> Void) {
         backend.queryAllWindows { [self] all in
             guard self.isActive(token) else { done(); return }
-            if !all.isEmpty { self.model.replaceSnapshot(all) }
+            guard let all = all else {
+                // Query FAILED — indistinguishable from "no windows" only if
+                // conflated, and acting on it would reopen a duplicate. Do
+                // nothing; the press is lost, the next one retries.
+                Log.error("jump: confirm query failed for \(appName), not reopening")
+                done(); return
+            }
+            self.model.replaceSnapshot(all)
             let windows = self.windowsForApp(appName, from: all)
             if windows.isEmpty {
                 self.handleNoWindows(appName: appName, focused: focused,
@@ -435,6 +450,12 @@ final class ActivationLogic {
                 if success {
                     // Read-your-writes: the next queued command must see the
                     // settled focus without a query, so bursts compound.
+                    // Deliberately NOT token-gated: the model records the
+                    // last-COMPLETED focus action. A superseded command's
+                    // late-landing success really did move OS focus, so the
+                    // unguarded write tracks reality better than a fenced
+                    // one would; any residual disagreement self-heals at the
+                    // next poll.
                     self.model.noteFocused(id: target.id)
                 } else {
                     Log.error("focus: yabai focus failed for window \(target.id)")
@@ -475,8 +496,9 @@ final class ActivationLogic {
             guard self.isActive(token) else { done(); return }
 
             self.backend.queryAllWindows { allWindows in
-                if !allWindows.isEmpty { self.model.replaceSnapshot(allWindows) }
-                let windows = self.windowsForApp(appName, from: allWindows)
+                // nil = failed query: keep polling on the next attempt.
+                if let allWindows { self.model.replaceSnapshot(allWindows) }
+                let windows = self.windowsForApp(appName, from: allWindows ?? [])
                 guard self.isActive(token) else { done(); return }
 
                 if let win = windows.first {
@@ -525,8 +547,6 @@ final class ActivationLogic {
     }
 
     func cycle(direction: CycleDirection) {
-        // A fresh user command expresses newer intent than any armed retry.
-        activationQueue.sync { pendingRetry = nil }
         submit(app: nil) { [self] token, done in
             Log.info("cycle: \(direction)")
             self.performCycle(direction: direction, token: token, done: done)
@@ -535,15 +555,19 @@ final class ActivationLogic {
 
     private func performCycle(direction: CycleDirection, token: UInt64,
                               done: @escaping () -> Void) {
-        // Model read only — no yabai queries. The pump has already settled
-        // the previous command's focus into the model (optimistic update).
-        guard let focused = model.focusedWindow else {
+        // One model read — no yabai queries, no torn read across a poller
+        // rebuild. The pump has already settled the previous command's focus
+        // into the model (optimistic update).
+        let snapshot = model.snapshot()
+        guard let focused = snapshot.focusedId.flatMap({ id in
+            snapshot.windows.first(where: { $0.id == id })
+        }) else {
             Log.error("cycle: no focused window")
             done(); return
         }
 
         let appName = config.resolveAlias(focused.appName)
-        let windows = windowsForApp(appName, from: model.snapshot().windows)
+        let windows = windowsForApp(appName, from: snapshot.windows)
         cycleWithKnownState(appName: appName, windows: windows,
                             focusedId: focused.id, direction: direction,
                             current: focused, token: token, done: done)

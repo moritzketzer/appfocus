@@ -16,24 +16,24 @@ final class YabaiBackend: WindowBackend {
         self.yabaiPath = yabaiPath
     }
 
-    func queryAllWindows(completion: @escaping ([WindowInfo]) -> Void) {
+    func queryAllWindows(completion: @escaping ([WindowInfo]?) -> Void) {
         // yabai has no --app filter; query all windows and filter client-side
         runYabai(["-m", "query", "--windows"]) { data in
             guard let data = data else {
-                completion([])
+                completion(nil)   // failed/timed-out query, NOT "no windows"
                 return
             }
             let json: [[String: Any]]
             do {
                 guard let parsed = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
                     Log.debug("queryAllWindows: unexpected JSON structure")
-                    completion([])
+                    completion(nil)
                     return
                 }
                 json = parsed
             } catch {
                 Log.debug("queryAllWindows: JSON parse failed: \(error)")
-                completion([])
+                completion(nil)
                 return
             }
             // Return the unfiltered snapshot: the WindowModel needs every
