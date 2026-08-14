@@ -59,6 +59,25 @@ final class ActivationLogic {
     /// commands are dropped. Initialised to "now" (healthy).
     private var hungUntil = DispatchTime.now()
 
+    // MARK: - One-shot retry of a watchdog-dropped focus action
+    //
+    // Observed: a cross-Space jump kept hitting the stall window and being
+    // watchdog-dropped while quick same-Space toggles landed in the gaps, so
+    // the user had to re-press. When the watchdog drops a command whose focus
+    // TARGET was already resolved, replay just the focus action once after
+    // the backoff. The decision logic is never replayed (an already-recorded
+    // MRU toggle must not double-toggle), launch/reopen never retries, and
+    // any newer user command cancels the pending retry.
+
+    private struct RetryTarget {
+        let appName: String?
+        let windowId: Int
+    }
+    /// The in-flight command's resolved focus target (guarded by activationQueue).
+    private var inFlightTarget: (token: UInt64, target: RetryTarget)?
+    /// Armed by the watchdog, consumed (or cancelled) exactly once.
+    private var pendingRetry: RetryTarget?
+
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
          processChecker: ProcessChecker, model: WindowModelStore) {
@@ -155,6 +174,7 @@ final class ActivationLogic {
     /// still-hung yabai.
     private func watchdogFire(_ token: UInt64) {
         var fired = false
+        var armed = false
         activationQueue.sync {
             guard token == currentToken, running else { return }  // already finished
             currentToken &+= 1
@@ -163,9 +183,45 @@ final class ActivationLogic {
             runningApp = nil
             hungUntil = DispatchTime.now() + self.hungBackoff
             fired = true
+            if let f = inFlightTarget, f.token == token {
+                pendingRetry = f.target
+                inFlightTarget = nil
+                armed = true
+            }
         }
         if fired {
             Log.error("pump: WATCHDOG tok=\(token) exceeded \(self.commandDeadline)s — yabai unresponsive; released + backing off \(self.hungBackoff)s")
+        }
+        if armed {
+            // Fire just past the backoff window so the resubmission is not
+            // dropped by the circuit breaker.
+            DispatchQueue.global().asyncAfter(deadline: .now() + hungBackoff + 0.05) { [weak self] in
+                self?.submitPendingRetry()
+            }
+        }
+    }
+
+    /// Submit the armed retry through the normal pump: re-validate the target
+    /// against the current model and replay ONLY the focus action. One shot —
+    /// the pending slot is cleared before submission, and the replayed focus
+    /// runs with armRetry=false so its own watchdog drop cannot re-arm.
+    private func submitPendingRetry() {
+        var retry: RetryTarget?
+        activationQueue.sync {
+            retry = pendingRetry
+            pendingRetry = nil
+        }
+        guard let retry else { return }  // cancelled by a newer user command
+        submit(app: retry.appName) { [self] token, done in
+            let windows = self.model.snapshot().windows
+            guard let target = windows.first(where: { $0.id == retry.windowId }),
+                  target.isStandardWindow, !target.isMinimized else {
+                Log.info("retry: window \(retry.windowId) gone, dropping")
+                done(); return
+            }
+            Log.info("retry: replaying focus for window \(target.id)")
+            self.focusWindow(target, from: self.model.focusedWindow,
+                             token: token, armRetry: false, done: done)
         }
     }
 
@@ -224,6 +280,8 @@ final class ActivationLogic {
 
     func jump(appName rawName: String) {
         let appName = config.resolveAlias(rawName)
+        // A fresh user command expresses newer intent than any armed retry.
+        activationQueue.sync { pendingRetry = nil }
         submit(app: appName) { [self] token, done in
             Log.info("jump: \(appName)")
             self.performJump(appName: appName, token: token, done: done)
@@ -362,7 +420,15 @@ final class ActivationLogic {
     }
 
     private func focusWindow(_ target: WindowInfo, from current: WindowInfo?,
-                             token: UInt64, done: @escaping () -> Void) {
+                             token: UInt64, armRetry: Bool = true,
+                             done: @escaping () -> Void) {
+        if armRetry {
+            // The focus target is resolved: if the watchdog drops this
+            // command mid-action, the retry can replay exactly this focus.
+            let retry = RetryTarget(appName: config.resolveAlias(target.appName),
+                                    windowId: target.id)
+            activationQueue.sync { inFlightTarget = (token, retry) }
+        }
         let focusTarget = { [self] in
             guard isActive(token) else { done(); return }
             backend.focusWindow(id: target.id) { success in
@@ -459,6 +525,8 @@ final class ActivationLogic {
     }
 
     func cycle(direction: CycleDirection) {
+        // A fresh user command expresses newer intent than any armed retry.
+        activationQueue.sync { pendingRetry = nil }
         submit(app: nil) { [self] token, done in
             Log.info("cycle: \(direction)")
             self.performCycle(direction: direction, token: token, done: done)

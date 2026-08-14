@@ -536,6 +536,97 @@ struct ActivationLogicTests {
         }
     }
 
+    // MARK: - One-shot retry after a watchdog drop
+
+    @Test func watchdogDroppedFocusRetriesOnceAfterBackoff() {
+        let h = Harness()
+        h.logic.hungBackoff = 0.0
+        h.backend.windows = [win(1, space: 2)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")   // resolves target 1, focus hangs
+        h.settle(ms: 100_000)
+        h.logic.fireWatchdogNowForTesting()
+        // GCD timers drift by seconds under parallel-suite load: poll for
+        // the retry instead of sleeping a fixed interval.
+        for _ in 0..<200 where h.backend.focusedWindowIds.count < 2 { usleep(20_000) }
+
+        // The retry replays the focus action for the SAME window once.
+        #expect(h.backend.focusedWindowIds == [1, 1])
+
+        while h.backend.completeNextFocusWindow() {}
+        for _ in 0..<100 where !h.logic.isIdleForTesting { usleep(10_000) }
+        #expect(h.logic.isIdleForTesting)
+    }
+
+    @Test func userCommandCancelsPendingRetry() {
+        let h = Harness()
+        h.logic.hungBackoff = 0.2
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 100_000)
+        h.logic.fireWatchdogNowForTesting()
+        // Press during the backoff window: the circuit breaker drops the
+        // press, but it still expresses newer intent — the pending retry is
+        // cancelled and must never replay. Wait generously past the retry's
+        // schedule (GCD timers drift under parallel-suite load) to prove
+        // the absence.
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 2_500_000)
+
+        #expect(h.backend.focusedWindowIds == [1])   // no replay
+        while h.backend.completeNextFocusWindow() {}
+        for _ in 0..<100 where !h.logic.isIdleForTesting { usleep(10_000) }
+        #expect(h.logic.isIdleForTesting)
+    }
+
+    @Test func noRetryWhenDroppedBeforeTargetResolved() {
+        // Stuck in the confirm query — no focus target was resolved yet, so
+        // nothing must replay (launch/reopen paths never auto-retry).
+        let h = Harness()
+        h.logic.hungBackoff = 0.0
+        h.backend.windows = []
+        h.backend.focusedWin = nil
+        // model empty → confirm path; hold the confirm query in flight so the
+        // watchdog drops the command before any focus target exists.
+        h.backend.queryAllWindowsCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 100_000)
+        h.logic.fireWatchdogNowForTesting()
+        h.settle()
+
+        #expect(h.backend.focusedWindowIds.isEmpty)
+        #expect(h.logic.isIdleForTesting)
+    }
+
+    @Test func retryTargetGoneFromModelIsDropped() {
+        let h = Harness()
+        h.logic.hungBackoff = 0.0
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 100_000)
+        h.model.replaceSnapshot([])       // window vanished before the retry
+        h.logic.fireWatchdogNowForTesting()
+        // Wait past the (drift-prone) retry schedule, then confirm the retry
+        // validated against the model, found the window gone, and dropped.
+        h.settle(ms: 2_000_000)
+
+        #expect(h.backend.focusedWindowIds == [1])  // no replay
+        for _ in 0..<100 where !h.logic.isIdleForTesting { usleep(10_000) }
+        #expect(h.logic.isIdleForTesting)
+    }
+
     @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {
         let h = Harness()
         h.backend.windows = [win(1, app: "Safari", space: 2),
