@@ -11,6 +11,19 @@ private func win(_ id: Int, app: String = "Safari", space: Int = 1,
                isSticky: sticky, isFloating: floating)
 }
 
+/// Deterministic xorshift RNG so the property test is reproducible (a failing
+/// seed always reproduces) rather than flaky.
+private struct FuzzRNG: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed == 0 ? 0xdead_beef_cafe_babe : seed }
+    mutating func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+}
+
 private struct Harness: @unchecked Sendable {
     let backend: MockWindowBackend
     let launcher: MockAppLauncher
@@ -105,7 +118,9 @@ struct ActivationLogicTests {
 
         h.logic.jump(appName: "Safari")
         h.backend.windows = [win(1, space: 2)]
-        h.settle(ms: 2_000_000)
+        // Poll for the launch/pollForWindow chain instead of a fixed sleep, so
+        // the real 0.2s poll timer isn't raced by parallel-test CPU load.
+        for _ in 0..<100 where h.backend.focusCalls.count < 2 { usleep(50_000) }
 
         #expect(h.backend.focusCalls == ["space:2", "window:1"])
     }
@@ -344,6 +359,52 @@ struct ActivationLogicTests {
         }
         h.settle()
         #expect(h.backend.focusedWindowCallCount == 1 + h.logic.maxPending)
+    }
+
+    @Test func pumpStaysConsistentUnderRandomCommandSequences() {
+        // Property test: for many random command sequences (jump across apps,
+        // next, prev) with focusedWindow deferred to force queuing/superseding/
+        // interleaving, once every deferred completion drains and the watchdog
+        // fires, the pump must (a) return to idle — never permanently wedged —
+        // and (b) never have focused a window that doesn't exist.
+        var rng = FuzzRNG(seed: 0xA11CE_5EED)
+        let apps = ["cmux", "Safari", "ChatGPT"]
+        for _ in 0..<150 {
+            let h = Harness()
+            var wins: [WindowInfo] = []
+            for (i, app) in apps.enumerated() {
+                wins.append(win(i * 10 + 1, app: app, space: i + 1))
+                wins.append(win(i * 10 + 2, app: app, space: i + 1))
+            }
+            h.backend.windows = wins
+            h.backend.focusedWin = wins.first
+            h.backend.focusedWindowCompletesImmediately = false
+            h.backend.focusWindowUpdatesFocusedWin = true
+            for app in apps { h.processChecker.runningApps.insert(app) }
+
+            let commands = Int.random(in: 1...12, using: &rng)
+            for _ in 0..<commands {
+                switch Int.random(in: 0...3, using: &rng) {
+                case 0, 1: h.logic.jump(appName: apps[Int.random(in: 0..<apps.count, using: &rng)])
+                case 2: h.logic.cycle(direction: .next)
+                default: h.logic.cycle(direction: .prev)
+                }
+                // Sometimes resolve an in-flight yabai call mid-sequence.
+                if Bool.random(using: &rng) { _ = h.backend.completeNextFocusedWindow() }
+            }
+
+            // Drain everything, fire the watchdog for any straggler, drain again.
+            var guardN = 0
+            while h.backend.completeNextFocusedWindow() { guardN += 1; if guardN > 500 { break } }
+            h.logic.fireWatchdogNowForTesting()
+            while h.backend.completeNextFocusedWindow() { guardN += 1; if guardN > 1000 { break } }
+            h.settle(ms: 20_000)
+
+            #expect(h.logic.isIdleForTesting, "pump must return to idle, never wedge")
+            let validIds = Set(wins.map { $0.id })
+            #expect(h.backend.focusedWindowIds.allSatisfy { validIds.contains($0) },
+                    "every focused window must be a real window")
+        }
     }
 
     @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {

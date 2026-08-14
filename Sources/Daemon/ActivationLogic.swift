@@ -174,6 +174,13 @@ final class ActivationLogic {
         watchdogFire(activationQueue.sync { currentToken })
     }
 
+    /// Test hook: the pump holds no in-flight or queued command. The core
+    /// resilience invariant is that this becomes true again after any command
+    /// sequence drains — the pump is never left permanently wedged.
+    var isIdleForTesting: Bool {
+        activationQueue.sync { !running && pending.isEmpty }
+    }
+
     /// Advance the pump when a command completes. Ignored when the completing
     /// command was already superseded (its token is no longer current), so a
     /// cancelled command's late callback cannot start the next one twice.
