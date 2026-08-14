@@ -36,8 +36,10 @@ final class YabaiBackend: WindowBackend {
                 completion([])
                 return
             }
+            // Return the unfiltered snapshot: the WindowModel needs every
+            // window (the focused one may be a sticky dialog the logic must
+            // guard against). Consumers re-filter with isStandardWindow.
             let windows = json.compactMap { WindowInfo.from(yabaiDict: $0) }
-                .filter { !$0.isMinimized && $0.isStandardWindow }
             completion(windows)
         }
     }

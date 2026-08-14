@@ -19,11 +19,16 @@ struct WindowInfo {
     /// yabai-computed and reliable — they are what classify overlays.
     let isSticky: Bool
     let isFloating: Bool
+    /// yabai's has-focus flag from the snapshot. Only meaningful on windows
+    /// parsed out of a full `queryAllWindows` dump; the WindowModel derives
+    /// its focusedId from it.
+    let hasFocus: Bool
 
     init(id: Int, appName: String, space: Int, isMinimized: Bool,
          role: String, title: String, hasAXReference: Bool,
          subrole: String = "AXStandardWindow",
-         isSticky: Bool = false, isFloating: Bool = false) {
+         isSticky: Bool = false, isFloating: Bool = false,
+         hasFocus: Bool = false) {
         self.id = id
         self.appName = appName
         self.space = space
@@ -34,6 +39,7 @@ struct WindowInfo {
         self.subrole = subrole
         self.isSticky = isSticky
         self.isFloating = isFloating
+        self.hasFocus = hasFocus
     }
 
     /// A user-facing standard window: eligible to be tracked, focused, and
@@ -78,11 +84,13 @@ struct WindowInfo {
             || dict["is-sticky"] as? Bool == true
         let isFloating = dict["is-floating"] as? Int == 1
             || dict["is-floating"] as? Bool == true
+        let hasFocus = dict["has-focus"] as? Int == 1
+            || dict["has-focus"] as? Bool == true
         return WindowInfo(id: id, appName: app, space: space,
                           isMinimized: isMinimized, role: role,
                           title: title, hasAXReference: hasAXRef,
                           subrole: subrole, isSticky: isSticky,
-                          isFloating: isFloating)
+                          isFloating: isFloating, hasFocus: hasFocus)
     }
 }
 
