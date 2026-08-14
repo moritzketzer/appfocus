@@ -50,9 +50,16 @@ struct WindowModel {
     var focusedId: Int?         // window with has-focus in the snapshot,
                                 // overridden by optimistic updates
     var generation: UInt64      // bumped on every rebuild
-    var lastRefresh: DispatchTime
 }
 ```
+
+As built: `lastRefresh` was dropped in review (unused); `generation` stays
+(tested, diagnostic). The optimistic update sets only `focusedId`, not the
+stored window's `hasFocus` flag — no consumer reads post-derivation
+`hasFocus`, and the semantics are deliberately "the model records the
+last-COMPLETED focus action" (a superseded command's late-landing success
+really did move OS focus, so the unfenced write tracks reality better; any
+disagreement self-heals at the next poll).
 
 `WindowInfo` gains a `hasFocus` field parsed from yabai's `has-focus`. The
 snapshot keeps every window (including sticky dialogs); consumers keep
@@ -73,6 +80,15 @@ The existing overlap guard stays: a slow query skips ticks instead of
 stacking. A stalled refresh delays only the invisible model update; keypresses
 keep reading the last good model. The separate small `focusedWindow` query
 disappears from the system: `has-focus` inside the full dump provides it.
+
+As built (review finding F1): `queryAllWindows` completes with an Optional —
+`nil` means the query FAILED (backend error/timeout) and callers must not
+read it as "no windows"; an empty array is a trustworthy, genuinely
+window-less desktop. The poller keeps the last good model on failure but
+accepts a genuine empty dump (else ghost windows would stay in the model
+forever once the desktop reaches zero windows, dead-ending every jump); the
+confirm branch drops the press on failure instead of reopening a duplicate;
+the launch poll skips the model rebuild on failure and keeps polling.
 
 Per-operation consistency (the staleness contract):
 
