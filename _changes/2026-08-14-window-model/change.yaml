@@ -19,3 +19,11 @@ history:
       by exact `ship`). Full lane; same session continues through plan,
       implementation, review, and deploy in this worktree, so the spec rides
       the final wt-finish.
+  - date: 2026-08-14
+    event: plan-written
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+    publication: bundled
+    reason: >-
+      Execution continues in this session and worktree; the plan rides the
+      final wt-finish with the implementation.
