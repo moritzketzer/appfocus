@@ -75,7 +75,7 @@ struct FocusPollerTests {
         backend.focusedWin = WindowInfo(
             id: 793, appName: "ChatGPT", space: 6, isMinimized: false,
             role: "AXWindow", title: "Codex", hasAXReference: true,
-            subrole: "AXDialog")
+            subrole: "AXDialog", isSticky: true, isFloating: true)
         let store = StateStore(stateDir: dir)
         let poller = FocusPoller(backend: backend, store: store, config: config)
 

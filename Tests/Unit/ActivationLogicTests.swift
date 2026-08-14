@@ -3,10 +3,12 @@ import Foundation
 import Testing
 
 private func win(_ id: Int, app: String = "Safari", space: Int = 1,
-                 subrole: String = "AXStandardWindow") -> WindowInfo {
+                 subrole: String = "AXStandardWindow",
+                 sticky: Bool = false, floating: Bool = false) -> WindowInfo {
     WindowInfo(id: id, appName: app, space: space,
                isMinimized: false, role: "AXWindow", title: "window \(id)",
-               hasAXReference: true, subrole: subrole)
+               hasAXReference: true, subrole: subrole,
+               isSticky: sticky, isFloating: floating)
 }
 
 private struct Harness: @unchecked Sendable {
@@ -541,7 +543,8 @@ struct ActivationLogicTests {
         let h = Harness()
         let real1 = win(786, app: "ChatGPT")
         let real2 = win(787, app: "ChatGPT")
-        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog")
+        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog",
+                         sticky: true, floating: true)
         h.backend.windows = [real1, real2, dialog]
 
         // Pollute MRU so prevFocusedId == 793 (the dialog), lastFocusedId == 786.
@@ -561,7 +564,8 @@ struct ActivationLogicTests {
         // highest-id real window lands on the lowest-id REAL window, never the
         // even-lower-id dialog.
         let h = Harness()
-        let dialog = win(785, app: "ChatGPT", subrole: "AXDialog")
+        let dialog = win(785, app: "ChatGPT", subrole: "AXDialog",
+                         sticky: true, floating: true)
         let real1 = win(786, app: "ChatGPT")
         let real2 = win(787, app: "ChatGPT")
         h.backend.windows = [dialog, real1, real2]
@@ -579,7 +583,8 @@ struct ActivationLogicTests {
         // window. Jump must land on the real window, not no-op on the dialog.
         let h = Harness()
         let real = win(786, app: "ChatGPT")
-        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog")
+        let dialog = win(793, app: "ChatGPT", subrole: "AXDialog",
+                         sticky: true, floating: true)
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog  // focused ON the sticky dialog
 
@@ -595,7 +600,8 @@ struct ActivationLogicTests {
         // Space transition to the standard target window.
         let h = Harness()
         let real = win(786, app: "ChatGPT", space: 7)
-        let dialog = win(793, app: "ChatGPT", space: 7, subrole: "AXDialog")
+        let dialog = win(793, app: "ChatGPT", space: 7, subrole: "AXDialog",
+                         sticky: true, floating: true)
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog
 

@@ -14,10 +14,16 @@ struct WindowInfo {
     /// document window (`AXStandardWindow`) from ChatGPT/Codex's sticky
     /// floating overlays (`AXDialog`, `AXSystemDialog`).
     let subrole: String
+    /// yabai's stable structural flags. Unlike `subrole` (a cached AX
+    /// passthrough that yabai reports empty for real windows), these are
+    /// yabai-computed and reliable — they are what classify overlays.
+    let isSticky: Bool
+    let isFloating: Bool
 
     init(id: Int, appName: String, space: Int, isMinimized: Bool,
          role: String, title: String, hasAXReference: Bool,
-         subrole: String = "AXStandardWindow") {
+         subrole: String = "AXStandardWindow",
+         isSticky: Bool = false, isFloating: Bool = false) {
         self.id = id
         self.appName = appName
         self.space = space
@@ -26,12 +32,34 @@ struct WindowInfo {
         self.title = title
         self.hasAXReference = hasAXReference
         self.subrole = subrole
+        self.isSticky = isSticky
+        self.isFloating = isFloating
     }
 
     /// A user-facing standard window: eligible to be tracked, focused, and
     /// cycled. Overlays (dialogs, floating palettes) are deliberately excluded
     /// so they can never enter MRU state or become a jump/cycle target.
-    var isStandardWindow: Bool { hasAXReference && subrole == "AXStandardWindow" }
+    ///
+    /// The old `subrole == "AXStandardWindow"` allowlist was the bug: yabai
+    /// reports `subrole == ""` for real windows (Safari most visibly), so those
+    /// windows were dropped — `windowsForApp` saw none and jump reopened a NEW
+    /// window instead of focusing. Classification is now driven by `is-sticky`,
+    /// yabai's stable, computed flag: the ChatGPT/Codex overlays that motivated
+    /// the filter are always sticky (they follow you across every Space), and
+    /// no real document window is. That primary signal catches even a Codex
+    /// overlay reporting a brand-new subrole. `subrole` is used only as a
+    /// denylist for the two explicit dialog values (a non-sticky app popup like
+    /// a Safari dialog); as a denylist an empty subrole never matches, so real
+    /// windows always pass — the opposite of the old allowlist. Tooltips carry
+    /// role `AXHelpTag`. Note `is-floating` is NOT excluded: yabai floats some
+    /// real app windows (System Settings), and excluding them would reopen.
+    var isStandardWindow: Bool {
+        hasAXReference
+            && role != "AXHelpTag"
+            && !isSticky
+            && subrole != "AXDialog"
+            && subrole != "AXSystemDialog"
+    }
 
     /// Parse a WindowInfo from a yabai JSON dictionary.
     static func from(yabaiDict dict: [String: Any]) -> WindowInfo? {
@@ -46,10 +74,15 @@ struct WindowInfo {
         let subrole = dict["subrole"] as? String ?? ""
         let hasAXRef = dict["has-ax-reference"] as? Int == 1
             || dict["has-ax-reference"] as? Bool == true
+        let isSticky = dict["is-sticky"] as? Int == 1
+            || dict["is-sticky"] as? Bool == true
+        let isFloating = dict["is-floating"] as? Int == 1
+            || dict["is-floating"] as? Bool == true
         return WindowInfo(id: id, appName: app, space: space,
                           isMinimized: isMinimized, role: role,
                           title: title, hasAXReference: hasAXRef,
-                          subrole: subrole)
+                          subrole: subrole, isSticky: isSticky,
+                          isFloating: isFloating)
     }
 }
 
