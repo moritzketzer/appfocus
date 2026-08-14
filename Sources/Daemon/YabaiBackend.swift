@@ -78,7 +78,9 @@ final class YabaiBackend: WindowBackend {
     }
 
     private func runYabai(_ args: [String], completion: @escaping (Data?) -> Void) {
+        let enqueued = DispatchTime.now()
         queue.async {
+            let started = DispatchTime.now()
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: self.yabaiPath)
@@ -96,6 +98,14 @@ final class YabaiBackend: WindowBackend {
                 finished = true
                 finishLock.unlock()
                 guard shouldRun else { return }
+                // Per-call queue-wait + run time (debug only). yabai is the
+                // flaky dependency; these timings are how a hang is diagnosed.
+                let now = DispatchTime.now()
+                let waitMs = Double(started.uptimeNanoseconds - enqueued.uptimeNanoseconds) / 1_000_000
+                let runMs = Double(now.uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
+                Log.debug(String(format: "yabai %@ -> wait=%.0fms run=%.0fms %@",
+                                 args.joined(separator: " "), waitMs, runMs,
+                                 data == nil ? "FAIL/nil" : "ok(\(data!.count)B)"))
                 completion(data)
             }
 

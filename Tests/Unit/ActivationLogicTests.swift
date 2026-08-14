@@ -34,6 +34,11 @@ private struct Harness: @unchecked Sendable {
         logic = ActivationLogic(config: config, backend: backend,
                                  launcher: launcher, store: store,
                                  processChecker: processChecker)
+        // Disable the hung-yabai watchdog by default: tests that defer mock
+        // completions hold a command "running" for the test's duration, which
+        // under parallel execution can exceed the production deadline and let
+        // the watchdog force-release mid-test. Watchdog tests opt back in.
+        logic.commandDeadline = 3600
     }
 
     /// Wait for async GCD callbacks to settle.
@@ -291,6 +296,54 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowCallCount == presses)
         #expect(h.backend.focusedWindowIds.count == presses)
         #expect(h.backend.focusedWindowIds.last == 1)
+    }
+
+    // MARK: - Resilience to a hung/slow yabai
+
+    @Test func watchdogReleasesPumpWhenAYabaiCallHangs() {
+        // A command whose yabai call never returns must not wedge the serial
+        // pump forever. The watchdog force-releases it so a later command runs.
+        let h = Harness()
+        h.logic.hungBackoff = 0.0        // no backoff, so the retry is never dropped
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(1)
+        h.backend.focusedWindowCompletesImmediately = false  // first command hangs
+
+        h.logic.jump(appName: "Safari")   // wedges on focusedWindow (running, no completion)
+        h.settle(ms: 50_000)
+
+        // Fire the watchdog as the real timer would once the deadline passes.
+        h.logic.fireWatchdogNowForTesting()
+
+        // yabai "recovers": a fresh jump must run, proving the pump was released
+        // and not left wedged behind the hung command.
+        h.backend.focusedWindowCompletesImmediately = true
+        h.logic.jump(appName: "Safari")
+        h.settle()
+        #expect(!h.backend.focusedWindowIds.isEmpty)
+    }
+
+    @Test func queueCapBoundsBacklogUnderHammering() {
+        // Hammering the same app while the running command is stuck must not
+        // build an unbounded backlog: only (1 running + maxPending) commands
+        // ever reach the backend; the rest are dropped by the cap.
+        let h = Harness()
+        h.logic.maxPending = 3
+        h.backend.windows = [win(1, app: "cmux"), win(2, app: "cmux")]
+        h.backend.focusedWin = win(1, app: "cmux")
+        h.backend.focusedWindowCompletesImmediately = false
+        h.backend.focusWindowUpdatesFocusedWin = true
+        h.processChecker.runningApps.insert("cmux")
+
+        for _ in 0..<10 { h.logic.jump(appName: "cmux") }
+
+        var drained = 0
+        while h.backend.completeNextFocusedWindow() {
+            h.settle(ms: 20_000); drained += 1
+            if drained > 20 { break }
+        }
+        h.settle()
+        #expect(h.backend.focusedWindowCallCount == 1 + h.logic.maxPending)
     }
 
     @Test func newerJumpCancelsWindowFocusAfterOlderSpaceTransition() {

@@ -26,6 +26,38 @@ final class ActivationLogic {
     private var runningApp: String?
     private var pending: [PumpJob] = []
 
+    // MARK: - Resilience to a hung/slow yabai
+    //
+    // yabai intermittently blocks for seconds to minutes inside an
+    // uninterruptible WindowServer/AX call (observed 38s and 328s hangs). Since
+    // every command waits on yabai, a serial pump would otherwise wedge for the
+    // full hang and pile up a backlog that storms on recovery. Three guards keep
+    // the switcher self-healing:
+    //   1. Watchdog — a command that doesn't finish within `commandDeadline` is
+    //      force-abandoned (its token is bumped so its late callbacks bail), and
+    //      the pump is released. No single hung call can freeze it for minutes.
+    //   2. Backoff — after a watchdog fire, new commands are dropped for
+    //      `hungBackoff` instead of hammering the still-hung yabai; a normal
+    //      completion clears it immediately (auto-recover).
+    //   3. Cap — at most `maxPending` queued commands, so hammering during a
+    //      slow spell can't build a backlog that storms when yabai returns.
+
+    /// Watchdog deadline. Instance-mutable so tests can shorten it without
+    /// racing other parallel tests. A legit cross-Space jump is ~1-1.5s and the
+    /// launch/poll path is bounded at ~3s, but during a hang we prefer to
+    /// release early and retry over waiting.
+    var commandDeadline: TimeInterval = 3.0
+    var hungBackoff: TimeInterval = 1.0
+    /// Backstop against pathological backlog during a slow-but-completing yabai.
+    /// Generous: normal fast input drains faster than it arrives so the queue
+    /// stays tiny, and a true hang is handled by the watchdog (which drops the
+    /// backlog), so this only bites an extreme hammer during a slow spell.
+    var maxPending = 16
+
+    /// While `DispatchTime.now() < hungUntil`, yabai is presumed hung and new
+    /// commands are dropped. Initialised to "now" (healthy).
+    private var hungUntil = DispatchTime.now()
+
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
          processChecker: ProcessChecker) {
@@ -57,7 +89,14 @@ final class ActivationLogic {
                         _ run: @escaping (UInt64, @escaping () -> Void) -> Void) {
         let job = PumpJob(app: app, run: run)
         var start: (UInt64, PumpJob)?
+        var action = ""
         activationQueue.sync {
+            // Circuit breaker: if a recent command timed out on yabai, drop new
+            // commands briefly instead of hammering the still-hung backend.
+            if DispatchTime.now() < hungUntil {
+                action = "DROP \(app ?? "cycle") (yabai unresponsive, backing off)"
+                return
+            }
             if running, let newApp = app,
                let curApp = runningApp, curApp != newApp {
                 // Genuine target change: cancel the in-flight command's async
@@ -66,21 +105,39 @@ final class ActivationLogic {
                 pending.removeAll()
                 runningApp = newApp
                 start = (currentToken, job)
+                action = "SUPERSEDE \(curApp)->\(newApp) tok=\(currentToken)"
             } else if running {
+                // Cap the queue so hammering during a slow spell can't build a
+                // backlog that storms when yabai recovers; keep the newest.
+                if pending.count >= self.maxPending {
+                    pending.removeFirst()
+                    action = "QUEUE \(app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
+                } else {
+                    action = "QUEUE \(app ?? "cycle") behind \(runningApp ?? "cycle") depth=\(pending.count + 1)"
+                }
                 pending.append(job)
             } else {
                 running = true
                 currentToken &+= 1
                 runningApp = app
                 start = (currentToken, job)
+                action = "START \(app ?? "cycle") tok=\(currentToken)"
             }
         }
+        Log.debug("pump: \(action)")
         if let (token, job) = start { runJob(token, job) }
     }
 
     /// Run one job outside the state lock. Wraps its completion so the pump is
     /// advanced exactly once, regardless of how many terminal paths call it.
     private func runJob(_ token: UInt64, _ job: PumpJob) {
+        // Watchdog: if this command hasn't finished by the deadline, assume
+        // yabai is hung and force-release the pump. Runs off the activation
+        // queue so it can take the lock. Self-invalidates when the command
+        // finished normally (token no longer current).
+        DispatchQueue.global().asyncAfter(deadline: .now() + self.commandDeadline) { [self] in
+            self.watchdogFire(token)
+        }
         let lock = NSLock()
         var fired = false
         job.run(token) { [self] in
@@ -90,23 +147,56 @@ final class ActivationLogic {
         }
     }
 
+    /// Force-release the pump when a command overran the deadline (yabai hung).
+    /// Bumps the token so the wedged command's late callbacks bail, drops the
+    /// backlog, and backs off so the next presses don't immediately re-hammer a
+    /// still-hung yabai.
+    private func watchdogFire(_ token: UInt64) {
+        var fired = false
+        activationQueue.sync {
+            guard token == currentToken, running else { return }  // already finished
+            currentToken &+= 1
+            pending.removeAll()
+            running = false
+            runningApp = nil
+            hungUntil = DispatchTime.now() + self.hungBackoff
+            fired = true
+        }
+        if fired {
+            Log.error("pump: WATCHDOG tok=\(token) exceeded \(self.commandDeadline)s — yabai unresponsive; released + backing off \(self.hungBackoff)s")
+        }
+    }
+
+    /// Test hook: synchronously fire the watchdog on the in-flight command,
+    /// exercising the force-release path deterministically without waiting on
+    /// the real GCD timer (which races under parallel test execution).
+    func fireWatchdogNowForTesting() {
+        watchdogFire(activationQueue.sync { currentToken })
+    }
+
     /// Advance the pump when a command completes. Ignored when the completing
     /// command was already superseded (its token is no longer current), so a
     /// cancelled command's late callback cannot start the next one twice.
     private func finish(_ token: UInt64) {
         var next: (UInt64, PumpJob)?
+        var note = ""
         activationQueue.sync {
-            guard token == currentToken else { return }
+            guard token == currentToken else { note = "STALE tok=\(token) cur=\(currentToken)"; return }
+            // A normal completion means yabai responded — clear any backoff.
+            hungUntil = DispatchTime.now()
             if pending.isEmpty {
                 running = false
                 runningApp = nil
+                note = "DONE tok=\(token) idle"
             } else {
                 let job = pending.removeFirst()
                 currentToken &+= 1
                 runningApp = job.app
                 next = (currentToken, job)
+                note = "DONE tok=\(token) -> next tok=\(currentToken) depth=\(pending.count)"
             }
         }
+        Log.debug("pump: \(note)")
         if let (token, job) = next { runJob(token, job) }
     }
 
