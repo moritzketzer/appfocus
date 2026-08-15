@@ -1,0 +1,20 @@
+created: 2026-08-15
+history:
+  - date: 2026-08-15
+    event: created
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+  - date: 2026-08-15
+    event: spec-written
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+  - date: 2026-08-15
+    event: ship-authorized
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+    publication: bundled
+    reason: >-
+      Standalone `ship` immediately after Moritz approved the presented
+      AX-less-fallback design ("can we be robust do it?" + design + `ship`).
+      Same session continues through plan, implementation, review, and deploy
+      in this worktree.
