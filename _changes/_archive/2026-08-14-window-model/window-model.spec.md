@@ -263,3 +263,25 @@ nix-config (separate repo, normal commit flow):
 test's timer load and self-poisoned via orphaned fixtures; `39e2b7d` fixes
 the tests only (serialized suite, 10 s budget, path-scoped pgrep, orphan
 reaping, poll-for-death, sliced fixture sleep). No production change.
+
+## Post-Deploy Fixes (2026-08-15, `focus-model-fences`)
+
+Live rapid-switching exposed two defects; reviewer finding F4's "accepted
+race" disposition was overturned by production evidence (snapshot queries
+measure 90-350 ms under load, so a poll straddling a focus action is routine):
+
+1. `replaceSnapshot` now takes `queryStartedAt` and fences: an optimistic
+   focus newer than the query's start wins, and a mid-transition dump with no
+   `has-focus` row keeps the prior focus while its window exists (clears when
+   gone, preserving the empty-desktop wipe). The poller stamps its query
+   start; the confirm/launch-poll rebuilds pass nil (their dumps cannot be
+   staler than the last optimistic update under pump serialization).
+2. A failed `focusSpace` (yabai refuses to focus the already-focused Space)
+   no longer aborts the jump — it logs and continues to the window focus.
+   The genuine-failure case degrades to invisible AX focus corrected at the
+   next poll instead of a dead press.
+
+Known incoherence, accepted: the poller records MRU from the raw dump's
+`has-focus` row, not the fenced `focusedId`, so a straddling dump can
+transiently flip an app's prev/last pair; `performJump` re-records the fenced
+focus before any MRU decision, so it self-corrects.
