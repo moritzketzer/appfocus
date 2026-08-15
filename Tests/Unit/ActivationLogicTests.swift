@@ -5,10 +5,11 @@ import Testing
 private func win(_ id: Int, app: String = "Safari", space: Int = 1,
                  subrole: String = "AXStandardWindow",
                  sticky: Bool = false, floating: Bool = false,
-                 hasFocus: Bool = false) -> WindowInfo {
+                 hasFocus: Bool = false, role: String = "AXWindow",
+                 ax: Bool = true) -> WindowInfo {
     WindowInfo(id: id, appName: app, space: space,
-               isMinimized: false, role: "AXWindow", title: "window \(id)",
-               hasAXReference: true, subrole: subrole,
+               isMinimized: false, role: role, title: "window \(id)",
+               hasAXReference: ax, subrole: subrole,
                isSticky: sticky, isFloating: floating, hasFocus: hasFocus)
 }
 
@@ -773,6 +774,39 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.focusedWindowIds.isEmpty)
+    }
+
+    // MARK: - AX-less window fallback (ChatGPT Chromium lazy-AX state)
+
+    @Test func jumpFallsBackToNativeActivationForAXlessWindows() {
+        let h = Harness()
+        h.processChecker.runningApps = ["ChatGPT"]
+        h.backend.windows = [win(40, app: "ChatGPT", space: 4,
+                                 subrole: "", role: "", ax: false)]
+        // model not synced — confirm branch runs and sees the AX-less window
+
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:4"])
+        #expect(h.launcher.activatedApps == ["ChatGPT"])
+        #expect(h.launcher.reopenedApps.isEmpty)
+        #expect(h.backend.focusedWindowIds.isEmpty)
+        #expect(h.store.stateIfCached(for: "ChatGPT")?.lastFocusedId == nil)
+        #expect(h.logic.isIdleForTesting)
+    }
+
+    @Test func stickyOverlayOnlyStillReopens() {
+        let h = Harness()
+        h.processChecker.runningApps = ["ChatGPT"]
+        h.backend.windows = [win(41, app: "ChatGPT", subrole: "AXDialog",
+                                 sticky: true, floating: true)]
+
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(h.launcher.activatedApps.isEmpty)
+        #expect(h.launcher.reopenedApps.count == 1)
     }
 
     // MARK: - Jump: process checker branches

@@ -90,11 +90,17 @@ final class MockProcessChecker: ProcessChecker, @unchecked Sendable {
 final class MockAppLauncher: AppLauncher, @unchecked Sendable {
     var launchedApps: [String] = []
     var reopenedApps: [(String, ReopenStrategy)] = []
+    var activatedApps: [String] = []
     var launchSuccess = true
 
     func launch(appName: String, completion: @escaping (Bool) -> Void) {
         launchedApps.append(appName)
         completion(launchSuccess)
+    }
+
+    func activate(appName: String, completion: @escaping () -> Void) {
+        activatedApps.append(appName)
+        completion()
     }
 
     func reopen(appName: String, strategy: ReopenStrategy, completion: @escaping () -> Void) {

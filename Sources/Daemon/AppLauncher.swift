@@ -5,6 +5,10 @@ import Foundation
 protocol AppLauncher {
     func launch(appName: String, completion: @escaping (Bool) -> Void)
     func reopen(appName: String, strategy: ReopenStrategy, completion: @escaping () -> Void)
+    /// Best-effort native activation of a running app (LaunchServices, no
+    /// AX). Used when the app's windows exist but lack yabai AX references
+    /// and therefore cannot be focused through the window backend.
+    func activate(appName: String, completion: @escaping () -> Void)
 }
 
 final class DefaultAppLauncher: AppLauncher {
@@ -30,6 +34,29 @@ final class DefaultAppLauncher: AppLauncher {
             } catch {
                 Log.error("open -a failed: \(error)")
                 completion(false)
+            }
+        }
+    }
+
+    func activate(appName: String, completion: @escaping () -> Void) {
+        queue.async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-a", appName]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+
+            process.terminationHandler = { proc in
+                if proc.terminationStatus == 0 { Log.info("Activated \(appName)") }
+                else { Log.error("open -a \(appName) activate failed (exit \(proc.terminationStatus))") }
+                completion()
+            }
+
+            do {
+                try process.run()
+            } catch {
+                Log.error("open -a activate failed: \(error)")
+                completion()
             }
         }
     }

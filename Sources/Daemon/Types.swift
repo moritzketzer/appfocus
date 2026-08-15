@@ -67,6 +67,20 @@ struct WindowInfo {
             && subrole != "AXSystemDialog"
     }
 
+    /// A window that would be a standard jump target except yabai holds no
+    /// AX reference for it. ChatGPT's Chromium build materializes its main
+    /// window in the AX tree only while frontmost, so yabai can miss the
+    /// reference entirely (empty role/subrole, unmanageable, unfocusable via
+    /// yabai). Such a window can't be focused directly, but its Space is
+    /// known and native activation reaches it.
+    var isAXlessCandidate: Bool {
+        !hasAXReference
+            && role != "AXHelpTag"
+            && !isSticky
+            && subrole != "AXDialog"
+            && subrole != "AXSystemDialog"
+    }
+
     /// Parse a WindowInfo from a yabai JSON dictionary.
     static func from(yabaiDict dict: [String: Any]) -> WindowInfo? {
         guard let id = dict["id"] as? Int,

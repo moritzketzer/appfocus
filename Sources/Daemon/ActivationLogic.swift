@@ -337,7 +337,12 @@ final class ActivationLogic {
             self.model.replaceSnapshot(all)
             let windows = self.windowsForApp(appName, from: all)
             if windows.isEmpty {
+                let axless = all.filter {
+                    self.config.resolveAlias($0.appName) == appName
+                        && !$0.isMinimized && $0.isAXlessCandidate
+                }
                 self.handleNoWindows(appName: appName, focused: focused,
+                                     axlessCandidates: axless,
                                      token: token, done: done)
             } else {
                 Log.info("jump: confirm found \(windows.count) window(s) for \(appName)")
@@ -348,11 +353,26 @@ final class ActivationLogic {
     }
 
     private func handleNoWindows(appName: String, focused: WindowInfo?,
+                                 axlessCandidates: [WindowInfo] = [],
                                  token: UInt64, done: @escaping () -> Void) {
         // Check if app is running (has process but no windows)
         let isRunning = processChecker.isAppRunning(name: appName)
 
         if isRunning {
+            // AX-less fallback: the app HAS a would-be-standard window, but
+            // yabai holds no AX reference for it (ChatGPT's lazy-ephemeral
+            // Chromium AX tree), so it cannot be focused via the backend.
+            // Reopening surfaces nothing; switching to the window's Space and
+            // natively activating the app does — and being frontmost on its
+            // own Space is what lets the AX tree materialize.
+            if let target = axlessCandidates.first {
+                Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — native fallback to space \(target.space); tiling needs a warm yabai restart (see gotchas)")
+                backend.focusSpace(index: target.space) { [self] _ in
+                    guard self.isActive(token) else { done(); return }
+                    launcher.activate(appName: appName) { done() }
+                }
+                return
+            }
             Log.info("jump: \(appName) running but no windows, reopening")
             let strategy = config.reopenStrategy(for: appName)
             launcher.reopen(appName: appName, strategy: strategy) { [self] in
