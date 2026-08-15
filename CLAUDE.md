@@ -98,6 +98,10 @@ The verification dump also feeds the WindowModel (fenced).
 
 - `appfocus stats [--since 2h]` — success rate, outcome counts, p50/p95
   latency by path and same/cross-Space, last 10 failures with forensics.
+  Taxonomy notes: cycle traces carry no app, so a cycle landing on a
+  sibling window classifies strictly (`wrong-window`, never `ok-app`);
+  a watchdog-cleared backlog is labeled `dropped-cap` with detail
+  "backlog dropped by watchdog".
 - `bench/appfocus-bench.sh [--dry-run]` — end-to-end benchmark through the
   real socket, asserting VISIBLE focus via yabai polling. Moves real focus
   for ~60-90 s: run attended. Exit nonzero on threshold violation.

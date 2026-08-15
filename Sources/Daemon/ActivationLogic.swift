@@ -129,7 +129,7 @@ final class ActivationLogic {
             // commands briefly instead of hammering the still-hung backend.
             if DispatchTime.now() < hungUntil {
                 action = "DROP \(app ?? "cycle") (yabai unresponsive, backing off)"
-                trace.outcome = "dropped-backoff"
+                trace.update { $0.outcome = "dropped-backoff" }
                 recordNow.append(trace)
                 return
             }
@@ -139,11 +139,11 @@ final class ActivationLogic {
                 // tail (bump token) and run the new jump immediately.
                 currentToken &+= 1
                 if let cur = runningTrace {
-                    cur.outcome = "superseded"
+                    cur.update { $0.outcome = "superseded" }
                     recordNow.append(cur)
                 }
                 for dropped in pending {
-                    dropped.trace.outcome = "superseded"
+                    dropped.trace.update { $0.outcome = "superseded" }
                     recordNow.append(dropped.trace)
                 }
                 pending.removeAll()
@@ -156,7 +156,7 @@ final class ActivationLogic {
                 // backlog that storms when yabai recovers; keep the newest.
                 if pending.count >= self.maxPending {
                     let evicted = pending.removeFirst()
-                    evicted.trace.outcome = "dropped-cap"
+                    evicted.trace.update { $0.outcome = "dropped-cap" }
                     recordNow.append(evicted.trace)
                     action = "QUEUE \(app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
                 } else {
@@ -208,12 +208,14 @@ final class ActivationLogic {
             guard token == currentToken, running else { return }  // already finished
             currentToken &+= 1
             if let cur = runningTrace {
-                cur.outcome = "timeout"
+                cur.update { $0.outcome = "timeout" }
                 timedOut.append(cur)
             }
             for dropped in pending {
-                dropped.trace.outcome = "dropped-cap"
-                dropped.trace.detail = "backlog dropped by watchdog"
+                dropped.trace.update {
+                    $0.outcome = "dropped-cap"
+                    $0.detail = "backlog dropped by watchdog"
+                }
                 timedOut.append(dropped.trace)
             }
             pending.removeAll()
@@ -253,14 +255,16 @@ final class ActivationLogic {
         }
         guard let retry else { return }  // cancelled by a newer user command
         let trace = CommandTrace(command: "jump", app: retry.appName)
-        trace.path = "retry"
+        trace.update { $0.path = "retry" }
         submit(app: retry.appName, trace: trace, userInitiated: false) { [self] token, done in
             let windows = self.model.snapshot().windows
             guard let target = windows.first(where: { $0.id == retry.windowId }),
                   target.isStandardWindow, !target.isMinimized else {
                 Log.info("retry: window \(retry.windowId) gone, dropping")
-                trace.outcome = "noop"
-                trace.detail = "retry target gone"
+                trace.update {
+                    $0.outcome = "noop"
+                    $0.detail = "retry target gone"
+                }
                 done(); return
             }
             Log.info("retry: replaying focus for window \(target.id)")
@@ -314,7 +318,7 @@ final class ActivationLogic {
         if let completed = completed {
             // Still "unknown" = an action completed and awaits on-screen
             // verification; anything else (noop/failed) was pre-classified.
-            if completed.outcome == "unknown" {
+            if completed.currentOutcome == "unknown" {
                 verifier.verify(completed)
             } else {
                 verifier.recordImmediate(completed)
@@ -364,12 +368,16 @@ final class ActivationLogic {
         }
 
         let windows = windowsForApp(appName, from: snapshot.windows)
+        trace.update {
+            $0.modelGeneration = snapshot.generation
+            $0.modelFocusedId = snapshot.focusedId
+        }
         if windows.isEmpty {
-            trace.path = "confirm"
+            trace.update { $0.path = "confirm" }
             confirmNoWindows(appName: appName, focused: focused,
                              trace: trace, token: token, done: done)
         } else {
-            trace.path = "hot"
+            trace.update { $0.path = "hot" }
             handleHasWindows(appName: appName, windows: windows,
                              focused: focused, trace: trace,
                              token: token, done: done)
@@ -389,8 +397,10 @@ final class ActivationLogic {
                 // conflated, and acting on it would reopen a duplicate. Do
                 // nothing; the press is lost, the next one retries.
                 Log.error("jump: confirm query failed for \(appName), not reopening")
-                trace.outcome = "failed"
-                trace.detail = "confirm query failed"
+                trace.update {
+                    $0.outcome = "failed"
+                    $0.detail = "confirm query failed"
+                }
                 done(); return
             }
             self.model.replaceSnapshot(all)
@@ -428,22 +438,26 @@ final class ActivationLogic {
             // own Space is what lets the AX tree materialize.
             if let target = axlessCandidates.first {
                 Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — native fallback to space \(target.space); tiling needs a warm yabai restart (see gotchas)")
-                trace.path = "fallback"
-                trace.targetSpace = target.space
-                trace.crossedSpace = true
-                trace.decidedAt = .now()
+                trace.update {
+                    $0.path = "fallback"
+                    $0.targetSpace = target.space
+                    $0.crossedSpace = true
+                    $0.decidedAt = .now()
+                }
                 backend.focusSpace(index: target.space) { [self] _ in
                     guard self.isActive(token) else { done(); return }
                     launcher.activate(appName: appName) {
-                        trace.actionedAt = .now()
+                        trace.update { $0.actionedAt = .now() }
                         done()
                     }
                 }
                 return
             }
             Log.info("jump: \(appName) running but no windows, reopening")
-            trace.path = "reopen"
-            trace.decidedAt = .now()
+            trace.update {
+                $0.path = "reopen"
+                $0.decidedAt = .now()
+            }
             let strategy = config.reopenStrategy(for: appName)
             launcher.reopen(appName: appName, strategy: strategy) { [self] in
                 guard self.isActive(token) else { done(); return }
@@ -452,13 +466,17 @@ final class ActivationLogic {
             }
         } else {
             Log.info("jump: \(appName) not running, launching")
-            trace.path = "launch"
-            trace.decidedAt = .now()
+            trace.update {
+                $0.path = "launch"
+                $0.decidedAt = .now()
+            }
             launcher.launch(appName: appName) { [self] success in
                 guard self.isActive(token), success else {
                     if !success {
-                        trace.outcome = "failed"
-                        trace.detail = "launch failed"
+                        trace.update {
+                            $0.outcome = "failed"
+                            $0.detail = "launch failed"
+                        }
                     }
                     done(); return
                 }
@@ -495,9 +513,11 @@ final class ActivationLogic {
                                    done: @escaping () -> Void) {
         guard windows.count > 1 else {
             Log.info("jump: \(appName) already focused, only 1 window")
-            trace.path = "noop"
-            trace.outcome = "noop"
-            trace.detail = "already focused, single window"
+            trace.update {
+                $0.path = "noop"
+                $0.outcome = "noop"
+                $0.detail = "already focused, single window"
+            }
             done(); return
         }
 
@@ -511,6 +531,10 @@ final class ActivationLogic {
                 focusWindow(target, from: focused, trace: trace,
                             token: token, done: done)
             } else {
+                trace.update {
+                    $0.outcome = "failed"
+                    $0.detail = "MRU target vanished from window set"
+                }
                 done()
             }
         } else {
@@ -535,8 +559,10 @@ final class ActivationLogic {
 
         guard let target = target else {
             Log.error("jump: no target window for \(appName)")
-            trace.outcome = "failed"
-            trace.detail = "no target window"
+            trace.update {
+                $0.outcome = "failed"
+                $0.detail = "no target window"
+            }
             done(); return
         }
 
@@ -549,9 +575,11 @@ final class ActivationLogic {
                              trace: CommandTrace,
                              token: UInt64, armRetry: Bool = true,
                              done: @escaping () -> Void) {
-        trace.targetWindowId = target.id
-        trace.targetSpace = target.space
-        trace.decidedAt = .now()
+        trace.update {
+            $0.targetWindowId = target.id
+            $0.targetSpace = target.space
+            $0.decidedAt = .now()
+        }
         if armRetry {
             // The focus target is resolved: if the watchdog drops this
             // command mid-action, the retry can replay exactly this focus.
@@ -562,7 +590,7 @@ final class ActivationLogic {
         let focusTarget = { [self] in
             guard isActive(token) else { done(); return }
             backend.focusWindow(id: target.id) { success in
-                trace.actionedAt = .now()
+                trace.update { $0.actionedAt = .now() }
                 if success {
                     // Read-your-writes: the next queued command must see the
                     // settled focus without a query, so bursts compound.
@@ -575,8 +603,10 @@ final class ActivationLogic {
                     self.model.noteFocused(id: target.id)
                 } else {
                     Log.error("focus: yabai focus failed for window \(target.id)")
-                    trace.outcome = "failed"
-                    trace.detail = "yabai window focus failed"
+                    trace.update {
+                        $0.outcome = "failed"
+                        $0.detail = "yabai window focus failed"
+                    }
                 }
                 done()
             }
@@ -589,7 +619,7 @@ final class ActivationLogic {
         }
 
         Log.info("focus: switching to space \(target.space) for window \(target.id)")
-        trace.crossedSpace = true
+        trace.update { $0.crossedSpace = true }
         backend.focusSpace(index: target.space) { [self] success in
             guard isActive(token) else { done(); return }
             if !success {
@@ -614,8 +644,10 @@ final class ActivationLogic {
                                done: @escaping () -> Void) {
         guard attempt < Self.windowPollMaxAttempts else {
             Log.error("jump: timed out waiting for \(appName) window")
-            trace.outcome = "failed"
-            trace.detail = "timed out waiting for window after launch/reopen"
+            trace.update {
+                $0.outcome = "failed"
+                $0.detail = "timed out waiting for window after launch/reopen"
+            }
             done(); return
         }
 
@@ -652,9 +684,11 @@ final class ActivationLogic {
         guard isActive(token) else { done(); return }
         guard windows.count > 1 else {
             Log.info("cycle: only \(windows.count) window(s)")
-            trace.path = "noop"
-            trace.outcome = "noop"
-            trace.detail = "only \(windows.count) window(s)"
+            trace.update {
+                $0.path = "noop"
+                $0.outcome = "noop"
+                $0.detail = "only \(windows.count) window(s)"
+            }
             done(); return
         }
 
@@ -664,9 +698,11 @@ final class ActivationLogic {
 
         let ring = store.state(for: appName).ring
         guard ring.count > 1 else {
-            trace.path = "noop"
-            trace.outcome = "noop"
-            trace.detail = "ring too small"
+            trace.update {
+                $0.path = "noop"
+                $0.outcome = "noop"
+                $0.detail = "ring too small"
+            }
             done(); return
         }
 
@@ -681,8 +717,10 @@ final class ActivationLogic {
             focusWindow(target, from: current, trace: trace,
                         token: token, done: done)
         } else {
-            trace.outcome = "failed"
-            trace.detail = "ring id \(nextId) not in window set"
+            trace.update {
+                $0.outcome = "failed"
+                $0.detail = "ring id \(nextId) not in window set"
+            }
             done()
         }
     }
@@ -701,14 +739,20 @@ final class ActivationLogic {
         // One model read — no yabai queries, no torn read across a poller
         // rebuild. The pump has already settled the previous command's focus
         // into the model (optimistic update).
-        trace.path = "hot"
         let snapshot = model.snapshot()
+        trace.update {
+            $0.path = "hot"
+            $0.modelGeneration = snapshot.generation
+            $0.modelFocusedId = snapshot.focusedId
+        }
         guard let focused = snapshot.focusedId.flatMap({ id in
             snapshot.windows.first(where: { $0.id == id })
         }) else {
             Log.error("cycle: no focused window")
-            trace.outcome = "failed"
-            trace.detail = "no focused window in model"
+            trace.update {
+                $0.outcome = "failed"
+                $0.detail = "no focused window in model"
+            }
             done(); return
         }
 

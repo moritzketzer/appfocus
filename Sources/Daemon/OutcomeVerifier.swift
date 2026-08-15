@@ -34,6 +34,13 @@ final class OutcomeVerifier: OutcomeVerifying {
     /// (burst coalescing): the replaced trace is finalized as
     /// `unverified-burst` so rapid switching costs at most one query.
     private var pending: CommandTrace?
+    /// Earliest time the CURRENT pending trace may be verified: its own
+    /// completion + delay. A replacement pushes this forward, and `fire`
+    /// re-arms for the remainder — otherwise the newest press of a burst
+    /// would be verified almost immediately after its completion, mid
+    /// Space-animation, producing false `invisible`/`wrong-window` on
+    /// exactly the burst scenario this telemetry exists to adjudicate.
+    private var pendingEligibleAt = DispatchTime.now()
     private var timerArmed = false
     private var loggedWriteFailure = false
 
@@ -54,18 +61,19 @@ final class OutcomeVerifier: OutcomeVerifying {
         queue.async {
             // Pre-classified completions (e.g. the focus action itself
             // reported failure) are recorded as-is without a query.
-            if trace.outcome == "failed" {
+            if trace.currentOutcome == "failed" {
                 self.write(trace)
                 return
             }
             if let replaced = self.pending {
-                replaced.outcome = "unverified-burst"
+                replaced.update { $0.outcome = "unverified-burst" }
                 self.write(replaced)
             }
             self.pending = trace
+            self.pendingEligibleAt = .now() + self.delay
             guard !self.timerArmed else { return }
             self.timerArmed = true
-            self.queue.asyncAfter(deadline: .now() + self.delay) {
+            self.queue.asyncAfter(deadline: self.pendingEligibleAt) {
                 self.fire()
             }
         }
@@ -75,6 +83,14 @@ final class OutcomeVerifier: OutcomeVerifying {
     private func fire() {
         timerArmed = false
         guard let trace = pending else { return }
+        // A replacement pushed the eligibility forward while this timer was
+        // in flight — re-arm for the remainder instead of verifying the
+        // newest press too early.
+        if DispatchTime.now() < pendingEligibleAt {
+            timerArmed = true
+            queue.asyncAfter(deadline: pendingEligibleAt) { self.fire() }
+            return
+        }
         pending = nil
         let queryStart = DispatchTime.now()
         backend.queryAllWindows { windows in
@@ -85,49 +101,52 @@ final class OutcomeVerifier: OutcomeVerifying {
         }
     }
 
-    // Runs on `queue`.
+    // Runs on `queue`. All trace mutations under the trace's own lock.
     private func classify(_ trace: CommandTrace, windows: [WindowInfo]?,
                           queryStart: DispatchTime) {
         guard let windows = windows else {
-            trace.outcome = "unverified-queryfail"
+            trace.update { $0.outcome = "unverified-queryfail" }
             return
         }
-        trace.verifyMs = Int((DispatchTime.now().uptimeNanoseconds
+        let verifyMs = Int((DispatchTime.now().uptimeNanoseconds
             &- queryStart.uptimeNanoseconds) / 1_000_000)
         // Verification doubles as a fresh post-switch model rebuild.
         model.replaceSnapshot(windows, queryStartedAt: queryStart)
 
         let focused = windows.first(where: { $0.hasFocus })
-        if let target = trace.targetWindowId {
-            if let focused = focused, focused.id == target {
-                trace.outcome = focused.isVisible ? "ok" : "invisible"
-                if !focused.isVisible {
-                    trace.detail = appendDetail(trace.detail,
-                        "focused but not visible; space=\(focused.space)")
+        trace.update { t in
+            t.verifyMs = verifyMs
+            if let target = t.targetWindowId {
+                if let focused = focused, focused.id == target {
+                    t.outcome = focused.isVisible ? "ok" : "invisible"
+                    if !focused.isVisible {
+                        t.detail = appendDetail(t.detail,
+                            "focused but not visible; space=\(focused.space)")
+                    }
+                } else if let focused = focused, let app = t.app,
+                          resolveAlias(focused.appName) == app {
+                    t.outcome = "ok-app"
+                    t.detail = appendDetail(t.detail,
+                        "landed on \(focused.id), predicted \(target)")
+                } else {
+                    t.outcome = "wrong-window"
+                    t.detail = appendDetail(t.detail,
+                        "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id) space=\($0.space)" } ?? "none")")
                 }
-            } else if let focused = focused, let app = trace.app,
-                      resolveAlias(focused.appName) == app {
-                trace.outcome = "ok-app"
-                trace.detail = appendDetail(trace.detail,
-                    "landed on \(focused.id), predicted \(target)")
+            } else if let app = t.app {
+                // Launch/reopen/fallback paths: no window id was predictable;
+                // success means the intended app is frontmost.
+                if let focused = focused, resolveAlias(focused.appName) == app {
+                    t.outcome = "ok-app"
+                } else {
+                    t.outcome = "wrong-window"
+                    t.detail = appendDetail(t.detail,
+                        "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id)" } ?? "none")")
+                }
             } else {
-                trace.outcome = "wrong-window"
-                trace.detail = appendDetail(trace.detail,
-                    "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id) space=\($0.space)" } ?? "none")")
+                t.outcome = "unverified-queryfail"
+                t.detail = appendDetail(t.detail, "no target and no app")
             }
-        } else if let app = trace.app {
-            // Launch/reopen/fallback paths: no window id was predictable;
-            // success means the intended app is frontmost.
-            if let focused = focused, resolveAlias(focused.appName) == app {
-                trace.outcome = "ok-app"
-            } else {
-                trace.outcome = "wrong-window"
-                trace.detail = appendDetail(trace.detail,
-                    "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id)" } ?? "none")")
-            }
-        } else {
-            trace.outcome = "unverified-queryfail"
-            trace.detail = appendDetail(trace.detail, "no target and no app")
         }
     }
 
