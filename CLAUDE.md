@@ -75,6 +75,9 @@ ActivationLogic is the core brain. It handles:
 - **watchdog + one-shot retry**: a command stuck >3s is force-dropped (pump
   never wedges); if its focus target was already resolved, the focus action
   replays once after the backoff unless a newer command supersedes it
+- **AX-less fallback**: a running app whose only windows lack yabai AX
+  references (ChatGPT lazy-AX state) gets focusSpace + native activation
+  instead of a useless reopen
 
 Native macOS APIs complement yabai: `open -a` for launching, osascript for reopening, NSWorkspace for process detection.
 
