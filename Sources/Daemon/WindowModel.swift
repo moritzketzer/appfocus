@@ -18,6 +18,13 @@ struct WindowModel {
 final class WindowModelStore {
     private let lock = NSLock()
     private var model = WindowModel()
+    /// When the last optimistic focus update landed. Snapshot queries take
+    /// 90-350ms while presses arrive every ~200-500ms during rapid
+    /// switching, so a poll straddling a focus action is COMMON — an
+    /// unfenced rebuild rolled focusedId back to the pre-switch value and
+    /// produced wrong "already focused" no-ops and spurious focusSpace
+    /// calls (observed live 2026-08-15).
+    private var lastOptimisticAt: DispatchTime?
 
     func snapshot() -> WindowModel {
         lock.lock(); defer { lock.unlock() }
@@ -25,15 +32,30 @@ final class WindowModelStore {
     }
 
     /// Full rebuild from a fresh queryAllWindows dump. focusedId is derived
-    /// from yabai's has-focus flag. Accepted race: a poll whose query
-    /// straddles a focus action can briefly roll the optimistic focusedId
-    /// back to the pre-action value (exposure = the query's duration; the
-    /// next poll or press corrects it). Fencing this with timestamps is not
-    /// worth the complexity for a tens-of-ms window.
-    func replaceSnapshot(_ windows: [WindowInfo]) {
+    /// from yabai's has-focus flag, with two fences:
+    /// 1. An optimistic update NEWER than the query's start wins — the dump
+    ///    captured pre-switch focus and must not roll it back.
+    /// 2. A dump with NO has-focus row (mid-Space-transition artifact)
+    ///    keeps the prior focus while that window still exists.
+    func replaceSnapshot(_ windows: [WindowInfo],
+                         queryStartedAt: DispatchTime? = nil) {
         lock.lock(); defer { lock.unlock() }
+        let prevFocusedId = model.focusedId
+        let prevStillPresent = prevFocusedId.map { id in
+            windows.contains(where: { $0.id == id })
+        } ?? false
         model.windows = windows
-        model.focusedId = windows.first(where: { $0.hasFocus })?.id
+        let dumpFocusedId = windows.first(where: { $0.hasFocus })?.id
+        if let start = queryStartedAt, let opt = lastOptimisticAt,
+           opt > start, prevStillPresent {
+            // Fence 1: keep the newer optimistic focus.
+        } else if let dumpId = dumpFocusedId {
+            model.focusedId = dumpId
+        } else if prevStillPresent {
+            // Fence 2: transition dump without a focused row.
+        } else {
+            model.focusedId = nil
+        }
         model.generation &+= 1
     }
 
@@ -43,6 +65,7 @@ final class WindowModelStore {
     func noteFocused(id: Int) {
         lock.lock(); defer { lock.unlock() }
         model.focusedId = id
+        lastOptimisticAt = .now()
     }
 
     /// The model's focused window, if it is still present in the snapshot.

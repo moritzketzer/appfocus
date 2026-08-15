@@ -493,9 +493,14 @@ final class ActivationLogic {
         Log.info("focus: switching to space \(target.space) for window \(target.id)")
         backend.focusSpace(index: target.space) { [self] success in
             guard isActive(token) else { done(); return }
-            guard success else {
-                Log.error("focus: yabai focus failed for space \(target.space)")
-                done(); return
+            if !success {
+                // yabai refuses to focus an already-focused Space, and a
+                // stale model can make this call spurious — aborting here
+                // made the press do nothing at all (observed live). Continue
+                // to the window focus: if we were already on the target
+                // Space it lands visibly; a genuine Space-focus failure
+                // still sets AX focus and the next press retries fresher.
+                Log.error("focus: yabai focus failed for space \(target.space) — continuing to window focus")
             }
             focusTarget()
         }

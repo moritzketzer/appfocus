@@ -776,6 +776,30 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowIds.isEmpty)
     }
 
+    // MARK: - focusSpace failure resilience
+
+    @Test func focusSpaceFailureStillFocusesWindow() {
+        // yabai errors on focusing an already-focused Space. A stale model
+        // can make the daemon issue exactly that spurious focusSpace; the
+        // jump must proceed to the window focus instead of aborting, or the
+        // press does nothing at all (observed live: "focus failed for space
+        // 1/3" with the target window never focused).
+        let h = Harness()
+        h.backend.windows = [win(1, space: 2)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
+        h.backend.focusSpaceCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 100_000)
+        h.backend.completeNextFocusSpace(success: false)   // "already focused"
+        h.settle()
+
+        #expect(h.backend.focusCalls == ["space:2", "window:1"])
+        #expect(h.backend.focusedWindowIds == [1])
+        #expect(h.logic.isIdleForTesting)
+    }
+
     // MARK: - AX-less window fallback (ChatGPT Chromium lazy-AX state)
 
     @Test func jumpFallsBackToNativeActivationForAXlessWindows() {

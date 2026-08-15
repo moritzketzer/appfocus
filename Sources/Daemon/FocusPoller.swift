@@ -53,6 +53,9 @@ final class FocusPoller {
         isPolling = true
         inFlightLock.unlock()
 
+        // Stamp the query's start so the model can fence out a rollback when
+        // a focus action commits while this (slow) query is in flight.
+        let queryStart = DispatchTime.now()
         backend.queryAllWindows { [self] windows in
             defer {
                 self.inFlightLock.lock()
@@ -64,7 +67,7 @@ final class FocusPoller {
             // is trustworthy and must be accepted, or ghost windows stay in
             // the model forever once the desktop reaches zero windows.
             guard let windows = windows else { return }
-            self.model.replaceSnapshot(windows)
+            self.model.replaceSnapshot(windows, queryStartedAt: queryStart)
             // Never track a non-user-facing window (sticky/floating dialogs
             // like ChatGPT/Codex overlays). Recording one here is how a
             // dialog would enter MRU state and become a jump/cycle target.
