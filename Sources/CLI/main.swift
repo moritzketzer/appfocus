@@ -6,8 +6,30 @@ let args = Array(CommandLine.arguments.dropFirst())
 
 guard !args.isEmpty else {
     FileHandle.standardError.write(
-        Data("Usage: appfocus <jump APP|next|prev|status>\n".utf8))
+        Data("Usage: appfocus <jump APP|next|prev|status|stats [--since 2h]>\n".utf8))
     exit(1)
+}
+
+// `stats` is entirely client-side: aggregate the daemon's telemetry JSONL.
+if args[0] == "stats" {
+    var since: Date?
+    if let idx = args.firstIndex(of: "--since"), idx + 1 < args.count {
+        guard let interval = TelemetryStats.parseSince(args[idx + 1]) else {
+            FileHandle.standardError.write(
+                Data("Invalid --since (use e.g. 30m, 2h, 1d)\n".utf8))
+            exit(1)
+        }
+        since = Date().addingTimeInterval(-interval)
+    }
+    let sink = SocketPath.stateDir + "/telemetry.jsonl"
+    var lines: [String] = []
+    for path in [sink + ".1", sink] {
+        if let content = try? String(contentsOfFile: path, encoding: .utf8) {
+            lines.append(contentsOf: content.split(separator: "\n").map(String.init))
+        }
+    }
+    print(TelemetryStats.aggregate(lines: lines, since: since))
+    exit(0)
 }
 
 let line = args.joined(separator: " ")
