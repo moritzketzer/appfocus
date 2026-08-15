@@ -19,6 +19,7 @@ Sources/
   Common/
     CommandProtocol.swift    — Command enum (jump/next/prev/status) + wire format parsing
     SocketPath.swift         — Unix socket path + sockaddr_un helpers
+    TelemetryStats.swift     — Pure aggregation behind `appfocus stats`
   CLI/
     main.swift               — CLI client: connects to daemon socket, sends command
   Daemon/
@@ -29,6 +30,8 @@ Sources/
     KanataCommandSource.swift — TCP server: parses kanata push-msg JSON envelopes
     SocketCommandSource.swift — Unix socket server: accepts CLI connections
     ActivationLogic.swift    — Core brain: jump (MRU toggle, launch, reopen), cycle (ring-based)
+    CommandTrace.swift       — Per-command telemetry record + JSONL encoding
+    OutcomeVerifier.swift    — Verified on-screen outcome classification + telemetry sink
     WindowModel.swift        — In-memory window snapshot + focused id; commands read this, not yabai
     StateStore.swift         — Per-app persistent state: MRU IDs, ring order, JSON on disk
     FocusPoller.swift        — Background timer: full window snapshot into WindowModel + MRU recording
@@ -80,6 +83,29 @@ ActivationLogic is the core brain. It handles:
   instead of a useless reopen
 
 Native macOS APIs complement yabai: `open -a` for launching, osascript for reopening, NSWorkspace for process detection.
+
+## Telemetry & Benchmark (the deploy gate)
+
+Every command produces one JSONL record in
+`~/.local/state/appfocus/telemetry.jsonl` (5 MB rotation to `.1`):
+intended target, path taken (`hot|confirm|launch|reopen|fallback|retry|noop`),
+phase timings (`decide`/`act`/`total`/`verify` ms), and a VERIFIED on-screen
+outcome — `OutcomeVerifier` runs one coalesced `queryAllWindows` ~350 ms
+after completion and classifies `ok` / `ok-app` / `invisible` /
+`wrong-window` / `failed` / `noop`, plus `superseded`/`dropped-*`/`timeout`
+recorded at their sites and `unverified-burst` for coalesced-away presses.
+The verification dump also feeds the WindowModel (fenced).
+
+- `appfocus stats [--since 2h]` — success rate, outcome counts, p50/p95
+  latency by path and same/cross-Space, last 10 failures with forensics.
+- `bench/appfocus-bench.sh [--dry-run]` — end-to-end benchmark through the
+  real socket, asserting VISIBLE focus via yabai polling. Moves real focus
+  for ~60-90 s: run attended. Exit nonzero on threshold violation.
+
+**Definition of works** (both instruments): ≥99% of decided presses end
+`ok`/`ok-app`/`noop`; p95 press-to-visible ≤300 ms same-Space / ≤700 ms
+cross-Space; zero dead presses in normal operation. Switching changes are
+not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Config
 

@@ -51,6 +51,7 @@ wait_for_window() {
   local target_id="$1" start elapsed line
   start=$(now_ms)
   while :; do
+    # shellcheck disable=SC2016  # $id is a jq variable, not shell
     line=$(dump | "$JQ" -r --argjson id "$target_id" \
       '.[] | select(.id==$id) | "\(."has-focus")\t\(."is-visible")"')
     if [ "$line" = "true	true" ]; then
