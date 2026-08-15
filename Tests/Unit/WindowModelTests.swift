@@ -32,6 +32,22 @@ struct WindowModelTests {
         #expect(WindowInfo.from(yabaiDict: dict)?.hasFocus == false)
     }
 
+    @Test func parsesIsVisibleFromYabaiDict() {
+        let dict: [String: Any] = [
+            "id": 42, "app": "Safari", "space": 3, "title": "t",
+            "role": "AXWindow", "is-visible": true,
+        ]
+        #expect(WindowInfo.from(yabaiDict: dict)?.isVisible == true)
+    }
+
+    @Test func isVisibleDefaultsToFalseWhenAbsent() {
+        let dict: [String: Any] = [
+            "id": 42, "app": "Safari", "space": 3, "title": "t",
+            "role": "AXWindow",
+        ]
+        #expect(WindowInfo.from(yabaiDict: dict)?.isVisible == false)
+    }
+
     @Test func replaceSnapshotDerivesFocusedIdFromHasFocus() {
         let store = WindowModelStore()
         store.replaceSnapshot([win(1), win(2, hasFocus: true)])

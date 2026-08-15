@@ -23,12 +23,17 @@ struct WindowInfo {
     /// parsed out of a full `queryAllWindows` dump; the WindowModel derives
     /// its focusedId from it.
     let hasFocus: Bool
+    /// yabai's is-visible flag: the window is on the active Space (or
+    /// sticky) and not hidden/minimized. Outcome verification uses it to
+    /// distinguish a genuinely landed switch from the swoosh-off
+    /// "focused but invisible" failure mode.
+    let isVisible: Bool
 
     init(id: Int, appName: String, space: Int, isMinimized: Bool,
          role: String, title: String, hasAXReference: Bool,
          subrole: String = "AXStandardWindow",
          isSticky: Bool = false, isFloating: Bool = false,
-         hasFocus: Bool = false) {
+         hasFocus: Bool = false, isVisible: Bool = false) {
         self.id = id
         self.appName = appName
         self.space = space
@@ -40,6 +45,7 @@ struct WindowInfo {
         self.isSticky = isSticky
         self.isFloating = isFloating
         self.hasFocus = hasFocus
+        self.isVisible = isVisible
     }
 
     /// A user-facing standard window: eligible to be tracked, focused, and
@@ -100,11 +106,14 @@ struct WindowInfo {
             || dict["is-floating"] as? Bool == true
         let hasFocus = dict["has-focus"] as? Int == 1
             || dict["has-focus"] as? Bool == true
+        let isVisible = dict["is-visible"] as? Int == 1
+            || dict["is-visible"] as? Bool == true
         return WindowInfo(id: id, appName: app, space: space,
                           isMinimized: isMinimized, role: role,
                           title: title, hasAXReference: hasAXRef,
                           subrole: subrole, isSticky: isSticky,
-                          isFloating: isFloating, hasFocus: hasFocus)
+                          isFloating: isFloating, hasFocus: hasFocus,
+                          isVisible: isVisible)
     }
 }
 
