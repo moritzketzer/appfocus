@@ -1,0 +1,166 @@
+// Tests/Unit/OutcomeVerifierTests.swift
+import Foundation
+import Testing
+
+private func win(_ id: Int, app: String = "Safari", space: Int = 1,
+                 hasFocus: Bool = false, visible: Bool = true) -> WindowInfo {
+    WindowInfo(id: id, appName: app, space: space,
+               isMinimized: false, role: "AXWindow", title: "w\(id)",
+               hasAXReference: true, subrole: "AXStandardWindow",
+               hasFocus: hasFocus, isVisible: visible)
+}
+
+private struct VerifierHarness {
+    let backend: MockWindowBackend
+    let model: WindowModelStore
+    let verifier: OutcomeVerifier
+    let sink: String
+
+    init() {
+        backend = MockWindowBackend()
+        model = WindowModelStore()
+        sink = NSTemporaryDirectory() + "appfocus-telemetry-\(UUID().uuidString).jsonl"
+        verifier = OutcomeVerifier(backend: backend, model: model,
+                                   resolveAlias: { $0 }, sinkPath: sink)
+        verifier.delay = 0.05
+    }
+
+    /// Condition-poll the sink until it holds `count` lines (GCD timers
+    /// drift under parallel-test load; never assert on a fixed sleep).
+    func waitForRecords(_ count: Int, timeoutMs: Int = 4000) -> [[String: Any]] {
+        for _ in 0..<(timeoutMs / 20) {
+            let lines = records()
+            if lines.count >= count { return lines }
+            usleep(20_000)
+        }
+        return records()
+    }
+
+    func records() -> [[String: Any]] {
+        guard let content = try? String(contentsOfFile: sink, encoding: .utf8) else { return [] }
+        return content.split(separator: "\n").compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any]
+        }
+    }
+
+    func trace(_ command: String = "jump", app: String? = "Safari",
+               target: Int? = nil) -> CommandTrace {
+        let t = CommandTrace(command: command, app: app)
+        t.path = "hot"
+        t.targetWindowId = target
+        t.decidedAt = .now()
+        t.actionedAt = .now()
+        t.outcome = "unknown"
+        return t
+    }
+}
+
+@Suite("OutcomeVerifier")
+struct OutcomeVerifierTests {
+
+    @Test func classifiesOkWhenTargetFocusedAndVisible() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(1, hasFocus: true, visible: true), win(2)]
+        h.verifier.verify(h.trace(target: 1))
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok")
+        #expect(recs.first?["verify_ms"] != nil)
+    }
+
+    @Test func classifiesInvisibleWhenTargetFocusedButNotVisible() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(1, hasFocus: true, visible: false)]
+        h.verifier.verify(h.trace(target: 1))
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "invisible")
+    }
+
+    @Test func classifiesOkAppWhenSameAppDifferentWindow() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(2, hasFocus: true), win(1)]
+        h.verifier.verify(h.trace(target: 1))
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+    }
+
+    @Test func classifiesWrongWindowWhenOtherAppFocused() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(9, app: "cmux", hasFocus: true), win(1)]
+        h.verifier.verify(h.trace(target: 1))
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "wrong-window")
+        #expect((recs.first?["detail"] as? String)?.contains("cmux") == true)
+    }
+
+    @Test func classifiesOkAppForAppOnlyIntent() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(5, hasFocus: true)]
+        h.verifier.verify(h.trace(target: nil))   // launch/reopen/fallback
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+    }
+
+    @Test func queryFailureYieldsUnverified() {
+        let h = VerifierHarness()
+        h.backend.queryAllWindowsFails = true
+        h.verifier.verify(h.trace(target: 1))
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "unverified-queryfail")
+    }
+
+    @Test func burstCoalescesToOneVerification() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(3, hasFocus: true)]
+        h.verifier.verify(h.trace(target: 1))
+        h.verifier.verify(h.trace(target: 2))
+        h.verifier.verify(h.trace(target: 3))
+        let recs = h.waitForRecords(3)
+        let outcomes = recs.compactMap { $0["outcome"] as? String }.sorted()
+        #expect(outcomes == ["ok", "unverified-burst", "unverified-burst"])
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+    }
+
+    @Test func preFailedTraceRecordsWithoutQuery() {
+        let h = VerifierHarness()
+        let t = h.trace(target: 1)
+        t.outcome = "failed"
+        h.verifier.verify(t)
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "failed")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func recordImmediateWrites() {
+        let h = VerifierHarness()
+        let t = h.trace()
+        t.outcome = "dropped-backoff"
+        h.verifier.recordImmediate(t)
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "dropped-backoff")
+    }
+
+    @Test func verificationFeedsModel() {
+        let h = VerifierHarness()
+        h.backend.windows = [win(7, hasFocus: true)]
+        h.verifier.verify(h.trace(target: 7))
+        _ = h.waitForRecords(1)
+        #expect(h.model.focusedWindow?.id == 7)
+    }
+
+    @Test func sinkRotatesAtThreshold() {
+        let h = VerifierHarness()
+        h.verifier.maxSinkBytes = 200
+        h.backend.windows = [win(1, hasFocus: true)]
+        for i in 0..<8 {
+            let t = h.trace()
+            t.outcome = "noop"
+            t.detail = "filler-\(i)-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            h.verifier.recordImmediate(t)
+        }
+        _ = h.waitForRecords(1)
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: h.sink + ".1") {
+            usleep(20_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: h.sink + ".1"))
+    }
+}
