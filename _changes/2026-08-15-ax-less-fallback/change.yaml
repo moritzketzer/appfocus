@@ -18,3 +18,14 @@ history:
       AX-less-fallback design ("can we be robust do it?" + design + `ship`).
       Same session continues through plan, implementation, review, and deploy
       in this worktree.
+  - date: 2026-08-15
+    event: plan-written
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+    publication: bundled
+    reason: same-session execution; artifacts ride the final wt-finish
+  - date: 2026-08-15
+    event: execution-started
+    session: 2a51397e-c75e-4eae-9bc9-fbed77c6fac3
+    tool: claude-code
+    branch: change/ax-less-fallback
