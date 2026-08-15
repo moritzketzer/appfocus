@@ -809,6 +809,24 @@ struct ActivationLogicTests {
         #expect(h.launcher.reopenedApps.count == 1)
     }
 
+    @Test func stickyAXlessOverlayIsNotAFallbackCandidate() {
+        // A sticky overlay that ALSO lost its AX reference must still route
+        // to reopen: sticky windows are never valid jump destinations, with
+        // or without an AX ref.
+        let h = Harness()
+        h.processChecker.runningApps = ["ChatGPT"]
+        h.backend.windows = [win(42, app: "ChatGPT", subrole: "",
+                                 sticky: true, floating: true,
+                                 role: "", ax: false)]
+
+        h.logic.jump(appName: "ChatGPT")
+        h.settle()
+
+        #expect(h.launcher.activatedApps.isEmpty)
+        #expect(h.backend.focusedSpaces.isEmpty)
+        #expect(h.launcher.reopenedApps.count == 1)
+    }
+
     // MARK: - Jump: process checker branches
 
     @Test func jumpNotRunningLaunchesApp() {

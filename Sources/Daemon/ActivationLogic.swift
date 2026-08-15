@@ -353,7 +353,7 @@ final class ActivationLogic {
     }
 
     private func handleNoWindows(appName: String, focused: WindowInfo?,
-                                 axlessCandidates: [WindowInfo] = [],
+                                 axlessCandidates: [WindowInfo],
                                  token: UInt64, done: @escaping () -> Void) {
         // Check if app is running (has process but no windows)
         let isRunning = processChecker.isAppRunning(name: appName)
