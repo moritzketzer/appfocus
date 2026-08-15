@@ -32,6 +32,7 @@ private struct Harness: @unchecked Sendable {
     let store: StateStore
     let model: WindowModelStore
     let processChecker: MockProcessChecker
+    let telemetry: MockOutcomeVerifier
     let logic: ActivationLogic
 
     init(aliases: [String: String] = [:],
@@ -46,12 +47,13 @@ private struct Harness: @unchecked Sendable {
         store = StateStore(stateDir: dir)
         model = WindowModelStore()
         processChecker = MockProcessChecker()
+        telemetry = MockOutcomeVerifier()
         // All apps default to "running" so existing tests keep working
         processChecker.runningApps = ["Safari", "Visual Studio Code", "Other"]
         logic = ActivationLogic(config: config, backend: backend,
                                  launcher: launcher, store: store,
                                  processChecker: processChecker,
-                                 model: model)
+                                 model: model, verifier: telemetry)
         // Disable the hung-yabai watchdog by default: tests that defer mock
         // completions hold a command "running" for the test's duration, which
         // under parallel execution can exceed the production deadline and let
@@ -774,6 +776,100 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.focusedWindowIds.isEmpty)
+    }
+
+    // MARK: - Command traces (telemetry)
+
+    @Test func hotJumpProducesVerifiableTrace() {
+        let h = Harness()
+        h.backend.windows = [win(1, space: 2), win(2)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.telemetry.verified.count == 1)
+        let t = h.telemetry.verified.first
+        #expect(t?.command == "jump")
+        #expect(t?.path == "hot")
+        #expect(t?.targetWindowId != nil)
+        #expect(t?.crossedSpace == true)
+        #expect(t?.decidedAt != nil)
+        #expect(t?.actionedAt != nil)
+        #expect(t?.outcome == "unknown")   // classification is the verifier's job
+    }
+
+    @Test func singleWindowMruNoopIsRecordedImmediately() {
+        let h = Harness()
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.telemetry.verified.isEmpty)
+        #expect(h.telemetry.immediate.count == 1)
+        #expect(h.telemetry.immediate.first?.outcome == "noop")
+    }
+
+    @Test func backoffDropIsRecorded() {
+        let h = Harness()
+        h.logic.hungBackoff = 3600
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 50_000)
+        h.logic.fireWatchdogNowForTesting()   // arms hungUntil far in the future
+        h.logic.jump(appName: "Safari")       // dropped by the breaker
+        h.settle()
+
+        let outcomes = h.telemetry.all.map { $0.outcome }
+        #expect(outcomes.contains("timeout"))
+        #expect(outcomes.contains("dropped-backoff"))
+    }
+
+    @Test func supersededCommandsAreRecorded() {
+        let h = Harness()
+        h.backend.windows = [win(1, app: "Safari", space: 2),
+                             win(2, app: "Code", space: 3)]
+        h.backend.focusedWin = win(99, app: "Other", space: 1)
+        h.sync()
+        h.backend.focusSpaceCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.logic.jump(appName: "Code")     // supersedes Safari mid-flight
+        h.settle()
+
+        #expect(h.telemetry.immediate.contains { $0.outcome == "superseded" && $0.app == "Safari" })
+
+        h.backend.completeNextFocusSpace()
+        h.backend.completeNextFocusSpace()
+        h.settle()
+        #expect(h.telemetry.verified.contains { $0.app == "Code" })
+    }
+
+    @Test func everyPressInABurstProducesExactlyOneRecord() {
+        let h = Harness()
+        h.backend.windows = [win(1), win(2), win(3)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+        h.store.update(appName: "Safari") { $0.ring = [1, 2, 3] }
+
+        let presses = 6
+        for _ in 0..<presses { h.logic.cycle(direction: .next) }
+        for _ in 0..<presses {
+            _ = h.backend.completeNextFocusWindow()
+            h.settle(ms: 20_000)
+        }
+        h.settle()
+
+        #expect(h.telemetry.all.count == presses)
     }
 
     // MARK: - focusSpace failure resilience

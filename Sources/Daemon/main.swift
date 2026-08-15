@@ -16,9 +16,12 @@ let launcher = DefaultAppLauncher()
 let store = StateStore()
 let processChecker = WorkspaceProcessChecker(config: config)
 let model = WindowModelStore()
+let verifier = OutcomeVerifier(backend: backend, model: model,
+                                resolveAlias: { config.resolveAlias($0) })
 let logic = ActivationLogic(config: config, backend: backend,
                              launcher: launcher, store: store,
-                             processChecker: processChecker, model: model)
+                             processChecker: processChecker, model: model,
+                             verifier: verifier)
 let poller = FocusPoller(backend: backend, store: store, config: config,
                           model: model)
 

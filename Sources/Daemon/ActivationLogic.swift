@@ -9,6 +9,7 @@ final class ActivationLogic {
     private let store: StateStore
     private let processChecker: ProcessChecker
     private let model: WindowModelStore
+    private let verifier: OutcomeVerifying
 
     /// Serial queue guarding the command pump's mutable state
     /// (`currentToken`, `running`, `runningApp`, `pending`).
@@ -21,10 +22,12 @@ final class ActivationLogic {
     /// closure that runs its async chain with a fresh token and a completion.
     private struct PumpJob {
         let app: String?
+        let trace: CommandTrace
         let run: (_ token: UInt64, _ done: @escaping () -> Void) -> Void
     }
     private var running = false
     private var runningApp: String?
+    private var runningTrace: CommandTrace?
     private var pending: [PumpJob] = []
 
     // MARK: - Resilience to a hung/slow yabai
@@ -80,13 +83,15 @@ final class ActivationLogic {
 
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
-         processChecker: ProcessChecker, model: WindowModelStore) {
+         processChecker: ProcessChecker, model: WindowModelStore,
+         verifier: OutcomeVerifying) {
         self.config = config
         self.backend = backend
         self.launcher = launcher
         self.store = store
         self.processChecker = processChecker
         self.model = model
+        self.verifier = verifier
     }
 
     // MARK: - Command pump (in-order serialization)
@@ -106,11 +111,13 @@ final class ActivationLogic {
     /// command that continues navigating the same context (`next`/`prev`, or a
     /// `jump` to the same app) is never a stale-focus hazard, so it queues and
     /// compounds instead of being discarded.
-    private func submit(app: String?, userInitiated: Bool = true,
+    private func submit(app: String?, trace: CommandTrace,
+                        userInitiated: Bool = true,
                         _ run: @escaping (UInt64, @escaping () -> Void) -> Void) {
-        let job = PumpJob(app: app, run: run)
+        let job = PumpJob(app: app, trace: trace, run: run)
         var start: (UInt64, PumpJob)?
         var action = ""
+        var recordNow: [CommandTrace] = []
         activationQueue.sync {
             // A fresh user command expresses newer intent than any armed
             // retry. Clearing INSIDE this critical section (not in a separate
@@ -122,6 +129,8 @@ final class ActivationLogic {
             // commands briefly instead of hammering the still-hung backend.
             if DispatchTime.now() < hungUntil {
                 action = "DROP \(app ?? "cycle") (yabai unresponsive, backing off)"
+                trace.outcome = "dropped-backoff"
+                recordNow.append(trace)
                 return
             }
             if running, let newApp = app,
@@ -129,15 +138,26 @@ final class ActivationLogic {
                 // Genuine target change: cancel the in-flight command's async
                 // tail (bump token) and run the new jump immediately.
                 currentToken &+= 1
+                if let cur = runningTrace {
+                    cur.outcome = "superseded"
+                    recordNow.append(cur)
+                }
+                for dropped in pending {
+                    dropped.trace.outcome = "superseded"
+                    recordNow.append(dropped.trace)
+                }
                 pending.removeAll()
                 runningApp = newApp
+                runningTrace = job.trace
                 start = (currentToken, job)
                 action = "SUPERSEDE \(curApp)->\(newApp) tok=\(currentToken)"
             } else if running {
                 // Cap the queue so hammering during a slow spell can't build a
                 // backlog that storms when yabai recovers; keep the newest.
                 if pending.count >= self.maxPending {
-                    pending.removeFirst()
+                    let evicted = pending.removeFirst()
+                    evicted.trace.outcome = "dropped-cap"
+                    recordNow.append(evicted.trace)
                     action = "QUEUE \(app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
                 } else {
                     action = "QUEUE \(app ?? "cycle") behind \(runningApp ?? "cycle") depth=\(pending.count + 1)"
@@ -147,11 +167,13 @@ final class ActivationLogic {
                 running = true
                 currentToken &+= 1
                 runningApp = app
+                runningTrace = job.trace
                 start = (currentToken, job)
                 action = "START \(app ?? "cycle") tok=\(currentToken)"
             }
         }
         Log.debug("pump: \(action)")
+        for t in recordNow { verifier.recordImmediate(t) }
         if let (token, job) = start { runJob(token, job) }
     }
 
@@ -181,12 +203,23 @@ final class ActivationLogic {
     private func watchdogFire(_ token: UInt64) {
         var fired = false
         var armed = false
+        var timedOut: [CommandTrace] = []
         activationQueue.sync {
             guard token == currentToken, running else { return }  // already finished
             currentToken &+= 1
+            if let cur = runningTrace {
+                cur.outcome = "timeout"
+                timedOut.append(cur)
+            }
+            for dropped in pending {
+                dropped.trace.outcome = "dropped-cap"
+                dropped.trace.detail = "backlog dropped by watchdog"
+                timedOut.append(dropped.trace)
+            }
             pending.removeAll()
             running = false
             runningApp = nil
+            runningTrace = nil
             hungUntil = DispatchTime.now() + self.hungBackoff
             fired = true
             if let f = inFlightTarget, f.token == token {
@@ -195,6 +228,7 @@ final class ActivationLogic {
                 armed = true
             }
         }
+        for t in timedOut { verifier.recordImmediate(t) }
         if fired {
             Log.error("pump: WATCHDOG tok=\(token) exceeded \(self.commandDeadline)s — yabai unresponsive; released + backing off \(self.hungBackoff)s")
         }
@@ -218,16 +252,21 @@ final class ActivationLogic {
             pendingRetry = nil
         }
         guard let retry else { return }  // cancelled by a newer user command
-        submit(app: retry.appName, userInitiated: false) { [self] token, done in
+        let trace = CommandTrace(command: "jump", app: retry.appName)
+        trace.path = "retry"
+        submit(app: retry.appName, trace: trace, userInitiated: false) { [self] token, done in
             let windows = self.model.snapshot().windows
             guard let target = windows.first(where: { $0.id == retry.windowId }),
                   target.isStandardWindow, !target.isMinimized else {
                 Log.info("retry: window \(retry.windowId) gone, dropping")
+                trace.outcome = "noop"
+                trace.detail = "retry target gone"
                 done(); return
             }
             Log.info("retry: replaying focus for window \(target.id)")
             self.focusWindow(target, from: self.model.focusedWindow,
-                             token: token, armRetry: false, done: done)
+                             trace: trace, token: token, armRetry: false,
+                             done: done)
         }
     }
 
@@ -251,23 +290,36 @@ final class ActivationLogic {
     private func finish(_ token: UInt64) {
         var next: (UInt64, PumpJob)?
         var note = ""
+        var completed: CommandTrace?
         activationQueue.sync {
             guard token == currentToken else { note = "STALE tok=\(token) cur=\(currentToken)"; return }
             // A normal completion means yabai responded — clear any backoff.
             hungUntil = DispatchTime.now()
+            completed = runningTrace
             if pending.isEmpty {
                 running = false
                 runningApp = nil
+                runningTrace = nil
                 note = "DONE tok=\(token) idle"
             } else {
                 let job = pending.removeFirst()
                 currentToken &+= 1
                 runningApp = job.app
+                runningTrace = job.trace
                 next = (currentToken, job)
                 note = "DONE tok=\(token) -> next tok=\(currentToken) depth=\(pending.count)"
             }
         }
         Log.debug("pump: \(note)")
+        if let completed = completed {
+            // Still "unknown" = an action completed and awaits on-screen
+            // verification; anything else (noop/failed) was pre-classified.
+            if completed.outcome == "unknown" {
+                verifier.verify(completed)
+            } else {
+                verifier.recordImmediate(completed)
+            }
+        }
         if let (token, job) = next { runJob(token, job) }
     }
 
@@ -286,14 +338,15 @@ final class ActivationLogic {
 
     func jump(appName rawName: String) {
         let appName = config.resolveAlias(rawName)
-        submit(app: appName) { [self] token, done in
+        let trace = CommandTrace(command: "jump", app: appName)
+        submit(app: appName, trace: trace) { [self] token, done in
             Log.info("jump: \(appName)")
-            self.performJump(appName: appName, token: token, done: done)
+            self.performJump(appName: appName, trace: trace, token: token, done: done)
         }
     }
 
-    private func performJump(appName: String, token: UInt64,
-                             done: @escaping () -> Void) {
+    private func performJump(appName: String, trace: CommandTrace,
+                             token: UInt64, done: @escaping () -> Void) {
         // Read the model ONCE — no yabai round-trip on the hot path, and no
         // torn read across a concurrent poller rebuild. A stalled
         // WindowServer now only delays the background refresh, never a press.
@@ -312,11 +365,14 @@ final class ActivationLogic {
 
         let windows = windowsForApp(appName, from: snapshot.windows)
         if windows.isEmpty {
+            trace.path = "confirm"
             confirmNoWindows(appName: appName, focused: focused,
-                             token: token, done: done)
+                             trace: trace, token: token, done: done)
         } else {
+            trace.path = "hot"
             handleHasWindows(appName: appName, windows: windows,
-                             focused: focused, token: token, done: done)
+                             focused: focused, trace: trace,
+                             token: token, done: done)
         }
     }
 
@@ -324,6 +380,7 @@ final class ActivationLogic {
     /// duplicate window (the Safari-reopen bug class), so this rare branch
     /// pays for a live query and feeds the result back into the model.
     private func confirmNoWindows(appName: String, focused: WindowInfo?,
+                                  trace: CommandTrace,
                                   token: UInt64, done: @escaping () -> Void) {
         backend.queryAllWindows { [self] all in
             guard self.isActive(token) else { done(); return }
@@ -332,6 +389,8 @@ final class ActivationLogic {
                 // conflated, and acting on it would reopen a duplicate. Do
                 // nothing; the press is lost, the next one retries.
                 Log.error("jump: confirm query failed for \(appName), not reopening")
+                trace.outcome = "failed"
+                trace.detail = "confirm query failed"
                 done(); return
             }
             self.model.replaceSnapshot(all)
@@ -342,18 +401,20 @@ final class ActivationLogic {
                         && !$0.isMinimized && $0.isAXlessCandidate
                 }
                 self.handleNoWindows(appName: appName, focused: focused,
-                                     axlessCandidates: axless,
+                                     axlessCandidates: axless, trace: trace,
                                      token: token, done: done)
             } else {
                 Log.info("jump: confirm found \(windows.count) window(s) for \(appName)")
                 self.handleHasWindows(appName: appName, windows: windows,
-                                      focused: focused, token: token, done: done)
+                                      focused: focused, trace: trace,
+                                      token: token, done: done)
             }
         }
     }
 
     private func handleNoWindows(appName: String, focused: WindowInfo?,
                                  axlessCandidates: [WindowInfo],
+                                 trace: CommandTrace,
                                  token: UInt64, done: @escaping () -> Void) {
         // Check if app is running (has process but no windows)
         let isRunning = processChecker.isAppRunning(name: appName)
@@ -367,31 +428,49 @@ final class ActivationLogic {
             // own Space is what lets the AX tree materialize.
             if let target = axlessCandidates.first {
                 Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — native fallback to space \(target.space); tiling needs a warm yabai restart (see gotchas)")
+                trace.path = "fallback"
+                trace.targetSpace = target.space
+                trace.crossedSpace = true
+                trace.decidedAt = .now()
                 backend.focusSpace(index: target.space) { [self] _ in
                     guard self.isActive(token) else { done(); return }
-                    launcher.activate(appName: appName) { done() }
+                    launcher.activate(appName: appName) {
+                        trace.actionedAt = .now()
+                        done()
+                    }
                 }
                 return
             }
             Log.info("jump: \(appName) running but no windows, reopening")
+            trace.path = "reopen"
+            trace.decidedAt = .now()
             let strategy = config.reopenStrategy(for: appName)
             launcher.reopen(appName: appName, strategy: strategy) { [self] in
                 guard self.isActive(token) else { done(); return }
                 self.pollForWindow(appName: appName, focused: focused,
-                                   token: token, done: done)
+                                   trace: trace, token: token, done: done)
             }
         } else {
             Log.info("jump: \(appName) not running, launching")
+            trace.path = "launch"
+            trace.decidedAt = .now()
             launcher.launch(appName: appName) { [self] success in
-                guard self.isActive(token), success else { done(); return }
+                guard self.isActive(token), success else {
+                    if !success {
+                        trace.outcome = "failed"
+                        trace.detail = "launch failed"
+                    }
+                    done(); return
+                }
                 self.pollForWindow(appName: appName, focused: focused,
-                                   token: token, done: done)
+                                   trace: trace, token: token, done: done)
             }
         }
     }
 
     private func handleHasWindows(appName: String, windows: [WindowInfo],
-                                    focused: WindowInfo?, token: UInt64,
+                                    focused: WindowInfo?, trace: CommandTrace,
+                                    token: UInt64,
                                     done: @escaping () -> Void) {
         // Only treat the app as "already focused" (MRU toggle / cycle) when a
         // REAL window of it is focused. If a sticky dialog is focused, fall
@@ -401,18 +480,24 @@ final class ActivationLogic {
         if let focused = focused, focused.isStandardWindow,
            config.resolveAlias(focused.appName) == appName {
             mruToggleOrCycle(appName: appName, windows: windows,
-                             focused: focused, token: token, done: done)
+                             focused: focused, trace: trace,
+                             token: token, done: done)
         } else {
             focusBestWindow(appName: appName, windows: windows,
-                            focused: focused, token: token, done: done)
+                            focused: focused, trace: trace,
+                            token: token, done: done)
         }
     }
 
     private func mruToggleOrCycle(appName: String, windows: [WindowInfo],
-                                   focused: WindowInfo, token: UInt64,
+                                   focused: WindowInfo, trace: CommandTrace,
+                                   token: UInt64,
                                    done: @escaping () -> Void) {
         guard windows.count > 1 else {
             Log.info("jump: \(appName) already focused, only 1 window")
+            trace.path = "noop"
+            trace.outcome = "noop"
+            trace.detail = "already focused, single window"
             done(); return
         }
 
@@ -423,7 +508,8 @@ final class ActivationLogic {
             Log.info("jump: \(appName) MRU switch to window \(prevId)")
             store.recordFocus(appName: appName, windowId: prevId)
             if let target = windows.first(where: { $0.id == prevId }) {
-                focusWindow(target, from: focused, token: token, done: done)
+                focusWindow(target, from: focused, trace: trace,
+                            token: token, done: done)
             } else {
                 done()
             }
@@ -432,12 +518,14 @@ final class ActivationLogic {
             let effectiveId = state.lastFocusedId ?? focused.id
             cycleWithKnownState(appName: appName, windows: windows,
                                 focusedId: effectiveId, direction: .next,
-                                current: focused, token: token, done: done)
+                                current: focused, trace: trace,
+                                token: token, done: done)
         }
     }
 
     private func focusBestWindow(appName: String, windows: [WindowInfo],
-                                 focused: WindowInfo?, token: UInt64,
+                                 focused: WindowInfo?, trace: CommandTrace,
+                                 token: UInt64,
                                  done: @escaping () -> Void) {
         let state = store.state(for: appName)
 
@@ -447,16 +535,23 @@ final class ActivationLogic {
 
         guard let target = target else {
             Log.error("jump: no target window for \(appName)")
+            trace.outcome = "failed"
+            trace.detail = "no target window"
             done(); return
         }
 
         Log.info("jump: focusing window \(target.id) for \(appName)")
-        focusWindow(target, from: focused, token: token, done: done)
+        focusWindow(target, from: focused, trace: trace,
+                    token: token, done: done)
     }
 
     private func focusWindow(_ target: WindowInfo, from current: WindowInfo?,
+                             trace: CommandTrace,
                              token: UInt64, armRetry: Bool = true,
                              done: @escaping () -> Void) {
+        trace.targetWindowId = target.id
+        trace.targetSpace = target.space
+        trace.decidedAt = .now()
         if armRetry {
             // The focus target is resolved: if the watchdog drops this
             // command mid-action, the retry can replay exactly this focus.
@@ -467,6 +562,7 @@ final class ActivationLogic {
         let focusTarget = { [self] in
             guard isActive(token) else { done(); return }
             backend.focusWindow(id: target.id) { success in
+                trace.actionedAt = .now()
                 if success {
                     // Read-your-writes: the next queued command must see the
                     // settled focus without a query, so bursts compound.
@@ -479,6 +575,8 @@ final class ActivationLogic {
                     self.model.noteFocused(id: target.id)
                 } else {
                     Log.error("focus: yabai focus failed for window \(target.id)")
+                    trace.outcome = "failed"
+                    trace.detail = "yabai window focus failed"
                 }
                 done()
             }
@@ -491,6 +589,7 @@ final class ActivationLogic {
         }
 
         Log.info("focus: switching to space \(target.space) for window \(target.id)")
+        trace.crossedSpace = true
         backend.focusSpace(index: target.space) { [self] success in
             guard isActive(token) else { done(); return }
             if !success {
@@ -510,10 +609,13 @@ final class ActivationLogic {
     private static let windowPollInterval: TimeInterval = 0.2
 
     private func pollForWindow(appName: String, focused: WindowInfo?,
+                               trace: CommandTrace,
                                token: UInt64, attempt: Int = 0,
                                done: @escaping () -> Void) {
         guard attempt < Self.windowPollMaxAttempts else {
             Log.error("jump: timed out waiting for \(appName) window")
+            trace.outcome = "failed"
+            trace.detail = "timed out waiting for window after launch/reopen"
             done(); return
         }
 
@@ -528,10 +630,12 @@ final class ActivationLogic {
 
                 if let win = windows.first {
                     Log.info("jump: found window for \(appName) after \(attempt + 1) polls")
-                    self.focusWindow(win, from: focused, token: token, done: done)
+                    self.focusWindow(win, from: focused, trace: trace,
+                                     token: token, done: done)
                 } else {
                     self.pollForWindow(appName: appName, focused: focused,
-                                       token: token, attempt: attempt + 1, done: done)
+                                       trace: trace, token: token,
+                                       attempt: attempt + 1, done: done)
                 }
             }
         }
@@ -542,11 +646,15 @@ final class ActivationLogic {
     /// Cycle windows using pre-fetched state. No async calls.
     private func cycleWithKnownState(appName: String, windows: [WindowInfo],
                                       focusedId: Int, direction: CycleDirection,
-                                      current: WindowInfo, token: UInt64,
+                                      current: WindowInfo, trace: CommandTrace,
+                                      token: UInt64,
                                       done: @escaping () -> Void) {
         guard isActive(token) else { done(); return }
         guard windows.count > 1 else {
             Log.info("cycle: only \(windows.count) window(s)")
+            trace.path = "noop"
+            trace.outcome = "noop"
+            trace.detail = "only \(windows.count) window(s)"
             done(); return
         }
 
@@ -555,7 +663,12 @@ final class ActivationLogic {
         }
 
         let ring = store.state(for: appName).ring
-        guard ring.count > 1 else { done(); return }
+        guard ring.count > 1 else {
+            trace.path = "noop"
+            trace.outcome = "noop"
+            trace.detail = "ring too small"
+            done(); return
+        }
 
         let currentIdx = ring.firstIndex(of: focusedId) ?? 0
         let step = direction == .next ? 1 : -1
@@ -565,29 +678,37 @@ final class ActivationLogic {
         Log.info("cycle: \(currentIdx) -> \(nextIdx) of \(ring.count) (window \(nextId))")
         store.recordFocus(appName: appName, windowId: nextId)
         if let target = windows.first(where: { $0.id == nextId }) {
-            focusWindow(target, from: current, token: token, done: done)
+            focusWindow(target, from: current, trace: trace,
+                        token: token, done: done)
         } else {
+            trace.outcome = "failed"
+            trace.detail = "ring id \(nextId) not in window set"
             done()
         }
     }
 
     func cycle(direction: CycleDirection) {
-        submit(app: nil) { [self] token, done in
+        let trace = CommandTrace(command: direction.rawValue, app: nil)
+        submit(app: nil, trace: trace) { [self] token, done in
             Log.info("cycle: \(direction)")
-            self.performCycle(direction: direction, token: token, done: done)
+            self.performCycle(direction: direction, trace: trace, token: token, done: done)
         }
     }
 
-    private func performCycle(direction: CycleDirection, token: UInt64,
+    private func performCycle(direction: CycleDirection, trace: CommandTrace,
+                              token: UInt64,
                               done: @escaping () -> Void) {
         // One model read — no yabai queries, no torn read across a poller
         // rebuild. The pump has already settled the previous command's focus
         // into the model (optimistic update).
+        trace.path = "hot"
         let snapshot = model.snapshot()
         guard let focused = snapshot.focusedId.flatMap({ id in
             snapshot.windows.first(where: { $0.id == id })
         }) else {
             Log.error("cycle: no focused window")
+            trace.outcome = "failed"
+            trace.detail = "no focused window in model"
             done(); return
         }
 
@@ -595,7 +716,8 @@ final class ActivationLogic {
         let windows = windowsForApp(appName, from: snapshot.windows)
         cycleWithKnownState(appName: appName, windows: windows,
                             focusedId: focused.id, direction: direction,
-                            current: focused, token: token, done: done)
+                            current: focused, trace: trace,
+                            token: token, done: done)
     }
 
     enum CycleDirection: String {

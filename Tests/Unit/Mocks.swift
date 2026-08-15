@@ -78,6 +78,31 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     }
 }
 
+/// Mock verifier capturing traces without queries or file writes.
+final class MockOutcomeVerifier: OutcomeVerifying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _immediate: [CommandTrace] = []
+    private var _verified: [CommandTrace] = []
+
+    var immediate: [CommandTrace] {
+        lock.lock(); defer { lock.unlock() }; return _immediate
+    }
+    var verified: [CommandTrace] {
+        lock.lock(); defer { lock.unlock() }; return _verified
+    }
+    var all: [CommandTrace] {
+        lock.lock(); defer { lock.unlock() }; return _immediate + _verified
+    }
+
+    func recordImmediate(_ trace: CommandTrace) {
+        lock.lock(); _immediate.append(trace); lock.unlock()
+    }
+
+    func verify(_ trace: CommandTrace) {
+        lock.lock(); _verified.append(trace); lock.unlock()
+    }
+}
+
 final class MockProcessChecker: ProcessChecker, @unchecked Sendable {
     var runningApps: Set<String> = []
 
