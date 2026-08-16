@@ -271,7 +271,10 @@ final class ActivationLogic {
                 done(); return
             }
             Log.info("retry: replaying focus for window \(target.id)")
-            self.focusWindow(target, from: self.model.focusedWindow,
+            // from: nil — a retry is by definition a distrusted-state
+            // replay; the same-Space skip must not fire on the very model
+            // state that just failed (mirrors the re-assert rule).
+            self.focusWindow(target, from: nil,
                              trace: trace, token: token, armRetry: false,
                              done: done)
         }
@@ -648,7 +651,10 @@ final class ActivationLogic {
                 // to the window focus: if we were already on the target
                 // Space it lands visibly; a genuine Space-focus failure
                 // still sets AX focus and the next press retries fresher.
-                Log.error("focus: yabai focus failed for space \(target.space) — continuing to window focus")
+                // Info, not error: the always-issued re-assert Space switch
+                // hits "already focused" on every healthy same-Space press;
+                // genuine anomalies surface as `invisible` telemetry.
+                Log.info("focus: yabai space focus for \(target.space) failed — continuing to window focus")
             }
             focusTarget()
         }
