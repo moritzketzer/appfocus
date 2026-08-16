@@ -337,7 +337,9 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Safari")
         h.settle()
 
-        #expect(h.backend.focusedWindowIds == [1])
+        // Re-assert must ALWAYS include the Space switch: the model's
+        // same-Space claim is exactly what is being distrusted.
+        #expect(h.backend.focusCalls == ["space:1", "window:1"])
     }
 
     @Test func supersededSpaceSwitchCannotKillAJumpToCurrentApp() {

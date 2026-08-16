@@ -527,9 +527,15 @@ final class ActivationLogic {
             // Space switch then carried the user AWAY (the 10% Space-1 dead
             // presses, 2026-08-16). Re-asserting is idempotent and
             // guarantees "jump X" always ENDS on X.
+            // Pass `focused: nil` so the same-Space skip cannot fire: the
+            // model claiming "same window, same Space" is exactly the state
+            // being distrusted here, and skipping focusSpace on a stale
+            // model lands AX focus on an invisible window (3 `invisible`
+            // telemetry records in the 2026-08-16 gate bench). Re-assert =
+            // always focusSpace + focusWindow.
             Log.info("jump: \(appName) already focused, single window — re-asserting")
             focusBestWindow(appName: appName, windows: windows,
-                            focused: focused, trace: trace,
+                            focused: nil, trace: trace,
                             token: token, done: done)
             return
         }
