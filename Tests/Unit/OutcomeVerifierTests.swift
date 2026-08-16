@@ -120,6 +120,23 @@ struct OutcomeVerifierTests {
         #expect(h.backend.queryAllWindowsCallCount == 1)
     }
 
+    @Test func newCommandStartInvalidatesPendingVerification() {
+        // At medium cadence (~500ms) a pending verification can fire just as
+        // the NEXT command's switch lands, blaming the previous press
+        // (observed live 2026-08-16: 15 false wrong-window records). Once a
+        // new command starts acting, the previous outcome must become
+        // unverified-burst — never attributed from a later dump.
+        let h = VerifierHarness()
+        h.backend.windows = [win(2, hasFocus: true), win(1)]
+        h.verifier.verify(h.trace(target: 1))
+        h.verifier.commandStarted()
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "unverified-burst")
+        // The armed timer must find nothing to verify: no query ever runs.
+        usleep(200_000)
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
     @Test func preFailedTraceRecordsWithoutQuery() {
         let h = VerifierHarness()
         let t = h.trace(target: 1)

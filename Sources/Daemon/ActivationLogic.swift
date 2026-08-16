@@ -180,6 +180,9 @@ final class ActivationLogic {
     /// Run one job outside the state lock. Wraps its completion so the pump is
     /// advanced exactly once, regardless of how many terminal paths call it.
     private func runJob(_ token: UInt64, _ job: PumpJob) {
+        // A new command is about to act: any pending verification of a
+        // previous command can no longer be attributed truthfully.
+        verifier.commandStarted()
         // Watchdog: if this command hasn't finished by the deadline, assume
         // yabai is hung and force-release the pump. Runs off the activation
         // queue so it can take the lock. Self-invalidates when the command

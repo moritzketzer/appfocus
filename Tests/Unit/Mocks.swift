@@ -101,6 +101,15 @@ final class MockOutcomeVerifier: OutcomeVerifying, @unchecked Sendable {
     func verify(_ trace: CommandTrace) {
         lock.lock(); _verified.append(trace); lock.unlock()
     }
+
+    private var _commandStartedCount = 0
+    var commandStartedCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _commandStartedCount
+    }
+
+    func commandStarted() {
+        lock.lock(); _commandStartedCount += 1; lock.unlock()
+    }
 }
 
 final class MockProcessChecker: ProcessChecker, @unchecked Sendable {

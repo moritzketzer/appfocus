@@ -9,6 +9,10 @@ protocol OutcomeVerifying {
     /// Schedule outcome verification for a completed command: one coalesced
     /// queryAllWindows ~delay later classifies what actually happened.
     func verify(_ trace: CommandTrace)
+    /// A new command began acting: any pending verification can no longer be
+    /// attributed (a later dump would blame the previous press for the new
+    /// command's switch) — finalize it as unverified-burst.
+    func commandStarted()
 }
 
 /// Verifies command outcomes off the pump: after a command completes, one
@@ -55,6 +59,16 @@ final class OutcomeVerifier: OutcomeVerifying {
 
     func recordImmediate(_ trace: CommandTrace) {
         queue.async { self.write(trace) }
+    }
+
+    func commandStarted() {
+        queue.async {
+            guard let replaced = self.pending else { return }
+            self.pending = nil
+            replaced.update { $0.outcome = "unverified-burst" }
+            self.write(replaced)
+            // The armed timer finds `pending == nil` and no-ops.
+        }
     }
 
     func verify(_ trace: CommandTrace) {
