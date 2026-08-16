@@ -324,7 +324,11 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowIds.last == 2)
     }
 
-    @Test func jumpAlreadyFocusedSingleWindowNoOp() {
+    @Test func jumpAlreadyFocusedSingleWindowReasserts() {
+        // "jump X while on X's only window" re-asserts focus instead of
+        // no-oping: the model can be mid-transition-stale (superseded Space
+        // switch in flight), and a no-op leaves the press dead while the
+        // zombie switch carries the user away.
         let h = Harness()
         h.backend.windows = [win(1)]
         h.backend.focusedWin = win(1)
@@ -333,7 +337,33 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Safari")
         h.settle()
 
-        #expect(h.backend.focusedWindowIds.isEmpty)
+        #expect(h.backend.focusedWindowIds == [1])
+    }
+
+    @Test func supersededSpaceSwitchCannotKillAJumpToCurrentApp() {
+        // The live 10% Space-1 dead press: jump A starts a cross-Space
+        // switch (uncancellable, in flight); jump B supersedes while the
+        // model still claims B focused → the old noop branch dropped the
+        // press and A's zombie Space switch landed. The superseding jump
+        // must re-assert B's focus.
+        let h = Harness()
+        h.backend.windows = [win(1, app: "Safari", space: 1),
+                             win(2, app: "Obsidian", space: 5)]
+        h.backend.focusedWin = win(1, app: "Safari", space: 1)
+        h.sync()
+        h.processChecker.runningApps.insert("Obsidian")
+        h.backend.focusSpaceCompletesImmediately = false
+
+        h.logic.jump(appName: "Obsidian")   // in-flight: focusSpace(5) pending
+        h.settle(ms: 50_000)
+        h.logic.jump(appName: "Safari")     // supersedes; model focus = Safari
+        h.settle()
+
+        // The Safari press must have issued its own focus actions.
+        #expect(h.backend.focusedWindowIds.contains(1))
+        h.backend.completeNextFocusSpace()  // zombie A switch lands late
+        h.settle()
+        #expect(h.logic.isIdleForTesting)
     }
 
     // MARK: - Jump: alias resolution
@@ -800,7 +830,7 @@ struct ActivationLogicTests {
         #expect(t?.outcome == "unknown")   // classification is the verifier's job
     }
 
-    @Test func singleWindowMruNoopIsRecordedImmediately() {
+    @Test func singleWindowReassertProducesVerifiableTrace() {
         let h = Harness()
         h.backend.windows = [win(1)]
         h.backend.focusedWin = win(1)
@@ -809,9 +839,10 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Safari")
         h.settle()
 
-        #expect(h.telemetry.verified.isEmpty)
-        #expect(h.telemetry.immediate.count == 1)
-        #expect(h.telemetry.immediate.first?.outcome == "noop")
+        // Re-assertion is a real action: verified like any focus, not a noop.
+        #expect(h.telemetry.immediate.isEmpty)
+        #expect(h.telemetry.verified.count == 1)
+        #expect(h.telemetry.verified.first?.targetWindowId == 1)
     }
 
     @Test func backoffDropIsRecorded() {

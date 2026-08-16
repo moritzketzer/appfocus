@@ -515,13 +515,18 @@ final class ActivationLogic {
                                    token: UInt64,
                                    done: @escaping () -> Void) {
         guard windows.count > 1 else {
-            Log.info("jump: \(appName) already focused, only 1 window")
-            trace.update {
-                $0.path = "noop"
-                $0.outcome = "noop"
-                $0.detail = "already focused, single window"
-            }
-            done(); return
+            // Re-assert focus instead of no-oping. The model can claim the
+            // app is focused while the world is mid-transition — observed
+            // live: a superseded command's uncancellable `space --focus` was
+            // still in flight, this branch no-oped the press, and the zombie
+            // Space switch then carried the user AWAY (the 10% Space-1 dead
+            // presses, 2026-08-16). Re-asserting is idempotent and
+            // guarantees "jump X" always ENDS on X.
+            Log.info("jump: \(appName) already focused, single window — re-asserting")
+            focusBestWindow(appName: appName, windows: windows,
+                            focused: focused, trace: trace,
+                            token: token, done: done)
+            return
         }
 
         let state = store.state(for: appName)
