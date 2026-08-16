@@ -132,8 +132,11 @@ SINGLES=$(echo "$WINDOWS_JSON" | "$JQ" -r '
   | .[] | "\(.app)\t\(.id)\t\(.space)"')
 
 # Apps with >=2 standard windows sharing one Space: app\tid1\tid2\tspace
+# Exactly-two-window apps with both windows on one Space: the MRU toggle
+# is only deterministic when these are the app's ONLY standard windows.
 PAIRS=$(echo "$WINDOWS_JSON" | "$JQ" -r '
-  group_by(.app)[] | group_by(.space)[] | select(length>=2)
+  group_by(.app) | map(select(length==2)) | .[]
+  | select(.[0].space == .[1].space)
   | "\(.[0].app)\t\(.[0].id)\t\(.[1].id)\t\(.[0].space)"' 2>/dev/null | head -5)
 
 if [ -n "$APP_A" ]; then
@@ -246,11 +249,15 @@ fi
 # ─── Telemetry cross-check ──────────────────────────────────────────────────
 sleep 1  # let the last verification land
 tele_bad=0
+tele_note=""
+if [ ! -f "$TELEMETRY" ]; then
+  tele_note=" (telemetry file absent — cross-check vacuous)"
+fi
 if [ -f "$TELEMETRY" ]; then
   # shellcheck disable=SC2016  # $ts is a jq variable, not shell
   tele_bad=$("$JQ" -r --arg ts "$BENCH_START_TS" \
     'select(.ts >= $ts) | .outcome' "$TELEMETRY" 2>/dev/null \
-    | grep -cE '^(dropped-backoff|dropped-cap|failed)$' || true)
+    | grep -cE '^(dropped-backoff|dropped-cap|failed|invisible|timeout)$' || true)
 fi
 
 # ─── Report ─────────────────────────────────────────────────────────────────
@@ -270,7 +277,7 @@ if [ ${#cross_space_lat[@]} -gt 0 ]; then
   cross_p95=$(printf '%s\n' "${cross_space_lat[@]}" | percentile 95)
   echo "cross-Space: n=${#cross_space_lat[@]} p50=${p50}ms p95=${cross_p95}ms (threshold p95<=700)"
 fi
-echo "daemon telemetry since bench start: dropped/failed outcomes: $tele_bad (threshold 0)"
+echo "daemon telemetry since bench start: bad outcomes: $tele_bad (threshold 0)$tele_note"
 
 if [ "$fail_count" -gt 0 ]; then
   echo; echo "FAILURES:"
