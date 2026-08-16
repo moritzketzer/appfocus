@@ -359,12 +359,17 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Obsidian")   // in-flight: focusSpace(5) pending
         h.settle(ms: 50_000)
         h.logic.jump(appName: "Safari")     // supersedes; model focus = Safari
+        h.settle(ms: 100_000)
+
+        // The zombie Obsidian switch completes first (stale token — bails)…
+        h.backend.completeNextFocusSpace()
+        h.settle(ms: 50_000)
+        // …then the Safari re-assert's own Space switch (always issued now).
+        h.backend.completeNextFocusSpace()
         h.settle()
 
-        // The Safari press must have issued its own focus actions.
         #expect(h.backend.focusedWindowIds.contains(1))
-        h.backend.completeNextFocusSpace()  // zombie A switch lands late
-        h.settle()
+        #expect(h.backend.focusedSpaces.contains(1))
         #expect(h.logic.isIdleForTesting)
     }
 
