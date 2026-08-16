@@ -634,14 +634,23 @@ final class ActivationLogic {
             }
         }
 
+        // ALWAYS issue the Space switch — the same-Space skip is gone. Three
+        // separate live defects came from trusting the model's Space claim
+        // (superseded-zombie dead press, re-assert invisible landing, and
+        // the first-press invisible landing at 09:45:58 on 2026-08-16 where
+        // a stale model skipped the switch and the press needed a re-press).
+        // The skip saved one ~10-70ms subprocess call on same-Space presses;
+        // focusSpace on the already-active Space errors harmlessly and the
+        // chain continues to the window focus either way. Correctness over
+        // a micro-optimization. `crossedSpace` still records the MODEL's
+        // view for the stats' same/cross split.
         if let current, current.isStandardWindow,
            current.space == target.space {
-            focusTarget()
-            return
+            trace.update { $0.crossedSpace = false }
+        } else {
+            trace.update { $0.crossedSpace = true }
         }
-
         Log.info("focus: switching to space \(target.space) for window \(target.id)")
-        trace.update { $0.crossedSpace = true }
         backend.focusSpace(index: target.space) { [self] success in
             guard isActive(token) else { done(); return }
             if !success {

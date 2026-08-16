@@ -230,7 +230,10 @@ struct ActivationLogicTests {
         #expect(h.backend.focusCalls == ["space:2", "window:1"])
     }
 
-    @Test func jumpOnSameSpaceFocusesOnlyWindow() {
+    @Test func jumpOnSameSpaceStillIssuesSpaceSwitch() {
+        // The same-Space skip is gone: three live defects came from trusting
+        // the model's Space claim. Every focus issues focusSpace first;
+        // yabai's "already focused" error on the current Space is harmless.
         let h = Harness()
         h.backend.windows = [win(1, space: 1)]
         h.backend.focusedWin = win(99, app: "Other", space: 1)
@@ -239,7 +242,7 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Safari")
         h.settle()
 
-        #expect(h.backend.focusCalls == ["window:1"])
+        #expect(h.backend.focusCalls == ["space:1", "window:1"])
     }
 
     @Test func launchedWindowAcrossSpacesFocusesSpaceBeforeWindow() {

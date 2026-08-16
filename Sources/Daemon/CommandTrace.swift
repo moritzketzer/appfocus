@@ -23,7 +23,9 @@ final class CommandTrace {
     var path: String = "unknown"  // hot|confirm|launch|reopen|fallback|retry|noop
     var targetWindowId: Int?
     var targetSpace: Int?
-    var crossedSpace = false   // whether a focusSpace was issued
+    var crossedSpace = false   // model's view: target on another Space than
+                               // the focused window (focusSpace is ALWAYS
+                               // issued; this drives the stats split only)
     let receivedAt: DispatchTime
     var decidedAt: DispatchTime?
     var actionedAt: DispatchTime?
