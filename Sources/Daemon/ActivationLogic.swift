@@ -271,10 +271,9 @@ final class ActivationLogic {
                 done(); return
             }
             Log.info("retry: replaying focus for window \(target.id)")
-            // from: nil — a retry is by definition a distrusted-state
-            // replay; the same-Space skip must not fire on the very model
-            // state that just failed (mirrors the re-assert rule).
-            self.focusWindow(target, from: nil,
+            // focusSpace is issued unconditionally now; the model's focused
+            // window only labels the trace's same/cross stats split.
+            self.focusWindow(target, from: self.model.focusedWindow,
                              trace: trace, token: token, armRetry: false,
                              done: done)
         }
@@ -530,15 +529,12 @@ final class ActivationLogic {
             // Space switch then carried the user AWAY (the 10% Space-1 dead
             // presses, 2026-08-16). Re-asserting is idempotent and
             // guarantees "jump X" always ENDS on X.
-            // Pass `focused: nil` so the same-Space skip cannot fire: the
-            // model claiming "same window, same Space" is exactly the state
-            // being distrusted here, and skipping focusSpace on a stale
-            // model lands AX focus on an invisible window (3 `invisible`
-            // telemetry records in the 2026-08-16 gate bench). Re-assert =
-            // always focusSpace + focusWindow.
+            // focusSpace is now issued unconditionally in focusWindow, so
+            // the real `focused` is safe to pass — it only labels the
+            // trace's same/cross stats split honestly.
             Log.info("jump: \(appName) already focused, single window — re-asserting")
             focusBestWindow(appName: appName, windows: windows,
-                            focused: nil, trace: trace,
+                            focused: focused, trace: trace,
                             token: token, done: done)
             return
         }
