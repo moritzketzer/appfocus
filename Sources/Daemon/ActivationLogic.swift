@@ -303,6 +303,20 @@ final class ActivationLogic {
             // A normal completion means yabai responded — clear any backoff.
             hungUntil = DispatchTime.now()
             completed = runningTrace
+            // Hand the completed trace to the verifier INSIDE this critical
+            // section: when the pump goes idle, a keypress on another thread
+            // could otherwise START (and enqueue commandStarted on the
+            // verifier queue) before this trace's verify() enqueues —
+            // reordering that would let a stale verification be attributed
+            // mid-next-command. Both verifier calls are non-blocking
+            // queue.async wrappers, so no lock-order hazard.
+            if let completed = completed {
+                if completed.currentOutcome == "unknown" {
+                    verifier.verify(completed)
+                } else {
+                    verifier.recordImmediate(completed)
+                }
+            }
             if pending.isEmpty {
                 running = false
                 runningApp = nil
@@ -318,15 +332,6 @@ final class ActivationLogic {
             }
         }
         Log.debug("pump: \(note)")
-        if let completed = completed {
-            // Still "unknown" = an action completed and awaits on-screen
-            // verification; anything else (noop/failed) was pre-classified.
-            if completed.currentOutcome == "unknown" {
-                verifier.verify(completed)
-            } else {
-                verifier.recordImmediate(completed)
-            }
-        }
         if let (token, job) = next { runJob(token, job) }
     }
 
