@@ -47,8 +47,12 @@ final class WindowModelStore {
         model.windows = windows
         let dumpFocusedId = windows.first(where: { $0.hasFocus })?.id
         if let start = queryStartedAt, let opt = lastOptimisticAt,
-           opt > start, prevStillPresent {
-            // Fence 1: keep the newer optimistic focus.
+           opt >= start, prevStillPresent {
+            // Fence 1: keep the optimistic focus that is not older than the
+            // query. >= not >: DispatchTime ticks are coarse enough that a
+            // press and a query start can share a timestamp (observed as a
+            // test flake 2026-08-16), and on a tie the optimistic update was
+            // not captured by the dump either — keeping it is correct.
         } else if let dumpId = dumpFocusedId {
             model.focusedId = dumpId
         } else if prevStillPresent {
