@@ -13,6 +13,10 @@ final class ActivationLogic {
     /// Serial queue guarding the command pump's mutable state
     /// (`currentToken`, `running`, `runningApp`, `pending`).
     private let activationQueue = DispatchQueue(label: "appfocus.activation")
+    /// Serializes pump transitions with the instant a job invokes its action.
+    /// Recursive because synchronous callbacks can finish one job and start
+    /// the next before the original `job.run` invocation unwinds.
+    private let jobStartLock = NSRecursiveLock()
     private var currentToken: UInt64 = 0
 
     // MARK: - Command pump state (guarded by activationQueue)
@@ -88,6 +92,12 @@ final class ActivationLogic {
     /// Armed by the watchdog, consumed (or cancelled) exactly once.
     private var pendingRetry: RetryTarget?
 
+    private func withPumpTransition<T>(_ body: () -> T) -> T {
+        jobStartLock.lock()
+        defer { jobStartLock.unlock() }
+        return activationQueue.sync(execute: body)
+    }
+
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
          workspace: ApplicationWorkspace = SystemApplicationWorkspace(),
@@ -126,7 +136,7 @@ final class ActivationLogic {
         var start: (UInt64, PumpJob)?
         var action = ""
         var recordNow: [CommandTrace] = []
-        activationQueue.sync {
+        withPumpTransition {
             // A fresh user command expresses newer intent than any armed
             // retry. Clearing INSIDE this critical section (not in a separate
             // sync before submit) closes the race where a watchdog fire
@@ -201,6 +211,15 @@ final class ActivationLogic {
     /// Run one job outside the state lock. Wraps its completion so the pump is
     /// advanced exactly once, regardless of how many terminal paths call it.
     private func runJob(_ token: UInt64, _ job: PumpJob) {
+        jobStartLock.lock()
+        defer { jobStartLock.unlock() }
+        let canStart = activationQueue.sync {
+            token == currentToken && running
+        }
+        guard canStart else {
+            Log.debug("pump: SKIP stale start tok=\(token)")
+            return
+        }
         // A new command is about to act: any pending verification of a
         // previous command can no longer be attributed truthfully.
         verifier.commandStarted()
@@ -234,7 +253,7 @@ final class ActivationLogic {
     private func applicationDeadlineFire(_ token: UInt64) {
         var next: (UInt64, PumpJob)?
         var fired = false
-        activationQueue.sync {
+        withPumpTransition {
             guard token == currentToken, running,
                   runningDomain == .application else { return }
             currentToken &+= 1
@@ -272,7 +291,7 @@ final class ActivationLogic {
         var fired = false
         var armed = false
         var timedOut: [CommandTrace] = []
-        activationQueue.sync {
+        withPumpTransition {
             guard token == currentToken, running,
                   runningDomain == .window else { return }
             currentToken &+= 1
@@ -383,7 +402,7 @@ final class ActivationLogic {
         var next: (UInt64, PumpJob)?
         var note = ""
         var completed: CommandTrace?
-        activationQueue.sync {
+        withPumpTransition {
             guard token == currentToken else { note = "STALE tok=\(token) cur=\(currentToken)"; return }
             if domain == .window {
                 // Only a normal window completion proves yabai recovered.

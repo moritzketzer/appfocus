@@ -120,6 +120,7 @@ final class MockOutcomeVerifier: OutcomeVerifying, @unchecked Sendable {
     private let lock = NSLock()
     private var _immediate: [CommandTrace] = []
     private var _verified: [CommandTrace] = []
+    var onNextImmediate: (() -> Void)?
 
     var immediate: [CommandTrace] {
         lock.lock(); defer { lock.unlock() }; return _immediate
@@ -132,7 +133,12 @@ final class MockOutcomeVerifier: OutcomeVerifying, @unchecked Sendable {
     }
 
     func recordImmediate(_ trace: CommandTrace) {
-        lock.lock(); _immediate.append(trace); lock.unlock()
+        lock.lock()
+        _immediate.append(trace)
+        let callback = onNextImmediate
+        onNextImmediate = nil
+        lock.unlock()
+        callback?()
     }
 
     func verify(_ trace: CommandTrace) {

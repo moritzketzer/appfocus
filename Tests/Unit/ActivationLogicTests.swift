@@ -706,6 +706,52 @@ struct ActivationLogicTests {
         #expect(h.logic.isIdleForTesting)
     }
 
+    @Test func newerNativeIntentWinsDuringWatchdogPromotionHandoff() {
+        let h = Harness(bundles: [
+            "Passwords": "com.apple.Passwords",
+            "Notes": "com.apple.Notes",
+        ])
+        h.logic.hungBackoff = 0.0
+        h.logic.applicationDeadline = 3600
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+        h.backend.focusSpaceCompletesImmediately = false
+        h.launcher.activationCompletesImmediately = false
+
+        h.logic.jump(appName: "Passwords")
+        h.logic.cycle(direction: .next)
+        h.logic.jump(appName: "Passwords")
+        h.settle(ms: 50_000)
+
+        h.launcher.activationCompletesImmediately = true
+        #expect(h.launcher.completeNextActivation())
+        h.settle(ms: 50_000)
+
+        let watchdogRecorded = DispatchSemaphore(value: 0)
+        let resumeWatchdog = DispatchSemaphore(value: 0)
+        let watchdogDone = DispatchSemaphore(value: 0)
+        h.telemetry.onNextImmediate = {
+            watchdogRecorded.signal()
+            _ = resumeWatchdog.wait(timeout: .now() + 10)
+        }
+        Thread.detachNewThread {
+            h.logic.fireWatchdogNowForTesting()
+            watchdogDone.signal()
+        }
+
+        #expect(watchdogRecorded.wait(timeout: .now() + 10) == .success)
+        h.logic.jump(appName: "Notes")
+        resumeWatchdog.signal()
+        #expect(watchdogDone.wait(timeout: .now() + 10) == .success)
+        h.settle(ms: 50_000)
+
+        #expect(h.launcher.activationCalls.map(\.appName) == [
+            "Passwords", "Notes",
+        ])
+        #expect(h.logic.isIdleForTesting)
+    }
+
     @Test func differentNativeTargetsRemainLastWriteWins() {
         let h = Harness(bundles: [
             "Passwords": "com.apple.Passwords",
