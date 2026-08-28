@@ -3,11 +3,11 @@ import Foundation
 import Testing
 
 private func line(outcome: String, path: String = "hot", total: Int? = nil,
-                  crossed: Bool = false, ts: String = "2026-08-15T12:00:00.000Z",
+                  crossed: Bool? = false, ts: String = "2026-08-15T12:00:00.000Z",
                   detail: String? = nil) -> String {
     var obj: [String: Any] = ["ts": ts, "cmd": "jump", "app": "Safari",
-                              "path": path, "outcome": outcome,
-                              "crossed_space": crossed]
+                              "path": path, "outcome": outcome]
+    if let crossed { obj["crossed_space"] = crossed }
     if let total = total { obj["total_ms"] = total }
     if let detail = detail { obj["detail"] = detail }
     let data = try! JSONSerialization.data(withJSONObject: obj)
@@ -62,12 +62,14 @@ struct TelemetryStatsTests {
 
     @Test func nativePathsRemainDecidedSuccesses() {
         let out = TelemetryStats.aggregate(lines: [
-            line(outcome: "ok-app", path: "native-bundle", total: 80),
-            line(outcome: "ok-app", path: "legacy-name", total: 90),
-            line(outcome: "ok-app", path: "native-axless", total: 100),
+            line(outcome: "ok-app", path: "native-bundle", total: 80, crossed: nil),
+            line(outcome: "ok-app", path: "legacy-name", total: 90, crossed: nil),
+            line(outcome: "ok-app", path: "native-axless", total: 100, crossed: nil),
         ])
         #expect(out.contains("100.0% (3/3 decided)"))
         #expect(out.contains("other paths   : n=3"))
+        #expect(out.contains("same-Space    : n=0"))
+        #expect(out.contains("cross-Space   : n=0"))
     }
 
     @Test func parseSinceHandlesUnits() {

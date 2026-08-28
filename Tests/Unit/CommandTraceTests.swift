@@ -17,6 +17,7 @@ struct CommandTraceTests {
         let obj = parse(trace.jsonLine())
         #expect(obj["target_kind"] as? String == "application")
         #expect(obj["target_bundle_id"] as? String == "com.apple.Passwords")
+        #expect(obj["crossed_space"] == nil)
     }
 
     @Test func encodesCoreFieldsAndDurations() {

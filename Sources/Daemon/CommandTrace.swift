@@ -38,9 +38,9 @@ final class CommandTrace {
     var targetBundleIdentifier: String?
     var targetWindowId: Int?
     var targetSpace: Int?
-    var crossedSpace = false   // model's view: target on another Space than
-                               // the focused window (focusSpace is ALWAYS
-                               // issued; this drives the stats split only)
+    var crossedSpace: Bool?    // model's view when a window target is known;
+                               // native application activation cannot infer
+                               // Space crossing and leaves this unknown
     let receivedAt: DispatchTime
     var decidedAt: DispatchTime?
     var actionedAt: DispatchTime?
@@ -101,9 +101,9 @@ final class CommandTrace {
             "cmd": command,
             "path": path,
             "outcome": outcome,
-            "crossed_space": crossedSpace,
             "target_kind": verificationTargetKind.rawValue,
         ]
+        if let crossedSpace { obj["crossed_space"] = crossedSpace }
         if let app = app { obj["app"] = app }
         if let bundle = targetBundleIdentifier {
             obj["target_bundle_id"] = bundle
