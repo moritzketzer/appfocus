@@ -111,5 +111,6 @@ let sigSources: [DispatchSourceSignal] = [SIGTERM, SIGINT].map { sig in
 
 Log.info("appfocusd ready")
 
-// Keep main thread alive
-dispatchMain()
+// Keep AppKit's main run loop alive so NSWorkspace state and notifications
+// continue to update in this long-running daemon.
+RunLoop.main.run()
