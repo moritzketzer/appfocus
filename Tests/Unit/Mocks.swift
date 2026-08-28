@@ -50,32 +50,44 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var focusWindowCompletesImmediately = true
     var pendingFocusWindowCompletions: [(Bool) -> Void] = []
     var queryAllWindowsCompletesImmediately = true
-    var pendingQueryAllWindowsCompletions: [([WindowInfo]?) -> Void] = []
+    var onDeferredQueryReady: (() -> Void)?
+    private var pendingQueryAllWindowsCompletions: [([WindowInfo]?) -> Void] = []
     /// When true, queryAllWindows reports FAILURE (nil), not an empty list.
     var queryAllWindowsFails = false
 
-    private let callCountLock = NSLock()
+    private let queryLock = NSLock()
     private var _queryAllWindowsCallCount = 0
     var queryAllWindowsCallCount: Int {
-        callCountLock.lock(); defer { callCountLock.unlock() }
+        queryLock.lock(); defer { queryLock.unlock() }
         return _queryAllWindowsCallCount
     }
 
     func queryAllWindows(completion: @escaping ([WindowInfo]?) -> Void) {
-        callCountLock.lock()
+        queryLock.lock()
         _queryAllWindowsCallCount += 1
-        callCountLock.unlock()
         if queryAllWindowsCompletesImmediately {
-            completion(queryAllWindowsFails ? nil : windows)
+            let result = queryAllWindowsFails ? nil : windows
+            queryLock.unlock()
+            completion(result)
         } else {
             pendingQueryAllWindowsCompletions.append(completion)
+            let ready = onDeferredQueryReady
+            queryLock.unlock()
+            ready?()
         }
     }
 
     @discardableResult
     func completeNextQueryAllWindows() -> Bool {
-        guard !pendingQueryAllWindowsCompletions.isEmpty else { return false }
-        pendingQueryAllWindowsCompletions.removeFirst()(queryAllWindowsFails ? nil : windows)
+        queryLock.lock()
+        guard !pendingQueryAllWindowsCompletions.isEmpty else {
+            queryLock.unlock()
+            return false
+        }
+        let completion = pendingQueryAllWindowsCompletions.removeFirst()
+        let result = queryAllWindowsFails ? nil : windows
+        queryLock.unlock()
+        completion(result)
         return true
     }
 

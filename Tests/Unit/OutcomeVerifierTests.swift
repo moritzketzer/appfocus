@@ -382,17 +382,23 @@ struct OutcomeVerifierTests {
 
     @Test func commandStartFencesAnInFlightWindowQuery() {
         let h = VerifierHarness()
+        let deferredQueryReady = DispatchSemaphore(value: 0)
+        let releaseDeferredQuery = DispatchSemaphore(value: 0)
+        h.backend.onDeferredQueryReady = {
+            deferredQueryReady.signal()
+            releaseDeferredQuery.wait()
+        }
         h.backend.queryAllWindowsCompletesImmediately = false
         h.verifier.verify(h.trace(target: 1))
 
-        for _ in 0..<500 where h.backend.queryAllWindowsCallCount == 0 {
-            usleep(20_000)
-        }
+        #expect(deferredQueryReady.wait(timeout: .now() + 10) == .success)
         #expect(h.backend.queryAllWindowsCallCount == 1)
 
         h.verifier.commandStarted()
         h.backend.windows = [win(1, hasFocus: true)]
-        #expect(h.backend.completeNextQueryAllWindows())
+        let completionWasReady = h.backend.completeNextQueryAllWindows()
+        releaseDeferredQuery.signal()
+        #expect(completionWasReady)
 
         let records = h.waitForRecords(1)
         #expect(records.count == 1)
