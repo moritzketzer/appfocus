@@ -26,6 +26,8 @@ private struct VerifierHarness {
                                    model: model,
                                    resolveAlias: { $0 }, sinkPath: sink)
         verifier.delay = 0.05
+        verifier.applicationVerificationTimeout = 0.15
+        verifier.applicationPollInterval = 0.01
     }
 
     /// Condition-poll the sink until it holds `count` lines (GCD timers
@@ -90,6 +92,24 @@ struct OutcomeVerifierTests {
         h.workspace.emitActivation(ApplicationIdentity(
             bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords"))
         h.workspace.frontmostApplication = nil
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func delayedActivationDoesNotPrematurelyRecordWrongWindow() {
+        let h = VerifierHarness()
+        h.verifier.applicationVerificationTimeout = 1.0
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.cmuxterm.app", localizedName: "cmux")
+
+        h.verifier.verify(h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords"))
+
+        #expect(h.waitForRecords(1, timeoutMs: 200).isEmpty)
+        h.workspace.emitActivation(ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords"))
 
         let recs = h.waitForRecords(1)
         #expect(recs.first?["outcome"] as? String == "ok-app")

@@ -6,8 +6,8 @@ protocol OutcomeVerifying {
     /// Record a command that never produced an on-screen action worth
     /// verifying (dropped/superseded/timeout/noop/pre-classified failure).
     func recordImmediate(_ trace: CommandTrace)
-    /// Schedule outcome verification for a completed command: one coalesced
-    /// queryAllWindows ~delay later classifies what actually happened.
+    /// Schedule outcome verification for a completed command. Window targets
+    /// use one coalesced query; application targets wait for native activation.
     func verify(_ trace: CommandTrace)
     /// A new command began acting: any pending verification can no longer be
     /// attributed (a later dump would blame the previous press for the new
@@ -15,11 +15,11 @@ protocol OutcomeVerifying {
     func commandStarted()
 }
 
-/// Verifies command outcomes off the pump: after a command completes, one
-/// delayed `queryAllWindows` establishes what is actually focused and
-/// visible on screen, classifies the outcome, feeds the (fenced) model, and
-/// appends one JSONL record per command to the telemetry sink. Never blocks
-/// or re-enters the command pump.
+/// Verifies command outcomes off the pump: window targets use a delayed
+/// `queryAllWindows`; application targets poll AppKit until activation or a
+/// bounded deadline. Successful window reads feed the (fenced) model. Every
+/// command appends one JSONL record to the telemetry sink. Never blocks or
+/// re-enters the command pump.
 final class OutcomeVerifier: OutcomeVerifying {
     private let backend: WindowBackend
     private let workspace: ApplicationWorkspace
@@ -32,6 +32,12 @@ final class OutcomeVerifier: OutcomeVerifying {
     /// enough for the WindowServer to settle the transition, short enough
     /// to attribute the state to the command. Instance-mutable for tests.
     var delay: TimeInterval = 0.35
+    /// Native open completion can precede the application becoming frontmost
+    /// by several seconds on a cold launch. Instance-mutable for tests.
+    var applicationVerificationTimeout: TimeInterval = 10.0
+    /// AppKit-only condition poll while native activation is still pending.
+    /// Instance-mutable for tests.
+    var applicationPollInterval: TimeInterval = 0.05
     /// Rotation threshold. Instance-mutable for tests.
     var maxSinkBytes: UInt64 = 5 * 1024 * 1024
 
@@ -118,13 +124,20 @@ final class OutcomeVerifier: OutcomeVerifying {
             queue.asyncAfter(deadline: pendingEligibleAt) { self.fire() }
             return
         }
-        pending = nil
         let target = trace.verificationTarget
         if target.kind == .application {
-            classifyApplication(trace, target: target)
-            write(trace)
+            if classifyApplication(trace, target: target) {
+                pending = nil
+                write(trace)
+            } else {
+                timerArmed = true
+                queue.asyncAfter(deadline: .now() + applicationPollInterval) {
+                    self.fire()
+                }
+            }
             return
         }
+        pending = nil
         let queryStart = DispatchTime.now()
         backend.queryAllWindows { windows in
             self.queue.async {
@@ -138,8 +151,8 @@ final class OutcomeVerifier: OutcomeVerifying {
     private func classifyApplication(
         _ trace: CommandTrace,
         target: VerificationTarget
-    ) {
-        let verifyStart = DispatchTime.now()
+    ) -> Bool {
+        let now = DispatchTime.now()
         let notificationIdentity: ApplicationIdentity?
         if let lastActivation,
            lastActivation.observedAt.uptimeNanoseconds
@@ -148,32 +161,66 @@ final class OutcomeVerifier: OutcomeVerifying {
         } else {
             notificationIdentity = nil
         }
-        let actual = workspace.frontmostApplication ?? notificationIdentity
-        let outcome: String
-        if let expectedBundle = target.bundleIdentifier {
-            outcome = actual?.bundleIdentifier == expectedBundle
-                ? "ok-app" : "wrong-window"
-        } else if let expectedName = target.app {
-            outcome = actual?.localizedName.map(resolveAlias) == expectedName
-                ? "ok-app" : "wrong-window"
-        } else {
-            outcome = "unverified-queryfail"
-        }
 
-        trace.update { t in
-            t.verifyMs = Int((DispatchTime.now().uptimeNanoseconds
-                &- verifyStart.uptimeNanoseconds) / 1_000_000)
-            t.outcome = outcome
-            if outcome == "wrong-window" {
-                let identity = actual.map {
-                    "\($0.bundleIdentifier ?? "unknown")/\($0.localizedName ?? "unknown")"
-                } ?? "none"
-                t.detail = appendDetail(t.detail, "actual=\(identity)")
-            } else if outcome == "unverified-queryfail" {
+        guard target.bundleIdentifier != nil || target.app != nil else {
+            trace.update { t in
+                t.verifyMs = 0
+                t.outcome = "unverified-queryfail"
                 t.detail = appendDetail(t.detail,
                     "no application target identity")
             }
+            return true
         }
+
+        let frontmost = workspace.frontmostApplication
+        if applicationMatches(frontmost, target: target)
+            || applicationMatches(notificationIdentity, target: target) {
+            trace.update { t in
+                t.verifyMs = elapsedMilliseconds(
+                    from: target.evidenceAfter, to: now)
+                t.outcome = "ok-app"
+            }
+            return true
+        }
+
+        // The current frontmost app may still be the source app while a cold
+        // native launch is completing. Keep waiting until success or deadline.
+        if now < target.evidenceAfter + applicationVerificationTimeout {
+            return false
+        }
+
+        let actual = frontmost ?? notificationIdentity
+        trace.update { t in
+            t.verifyMs = elapsedMilliseconds(
+                from: target.evidenceAfter, to: now)
+            t.outcome = "wrong-window"
+            let identity = actual.map {
+                "\($0.bundleIdentifier ?? "unknown")/\($0.localizedName ?? "unknown")"
+            } ?? "none"
+            t.detail = appendDetail(t.detail, "actual=\(identity)")
+        }
+        return true
+    }
+
+    private func applicationMatches(
+        _ identity: ApplicationIdentity?,
+        target: VerificationTarget
+    ) -> Bool {
+        guard let identity else { return false }
+        if let expectedBundle = target.bundleIdentifier {
+            return identity.bundleIdentifier == expectedBundle
+        }
+        if let expectedName = target.app {
+            return identity.localizedName.map(resolveAlias) == expectedName
+        }
+        return false
+    }
+
+    private func elapsedMilliseconds(
+        from start: DispatchTime,
+        to end: DispatchTime
+    ) -> Int {
+        Int((end.uptimeNanoseconds &- start.uptimeNanoseconds) / 1_000_000)
     }
 
     // Runs on `queue`. All trace mutations under the trace's own lock.

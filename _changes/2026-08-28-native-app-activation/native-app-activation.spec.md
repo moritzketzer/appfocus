@@ -339,17 +339,21 @@ adapters are absent.
 target kind, canonical app, bundle identifier, window identifier, and action
 timestamp. `OutcomeVerifier.classifyApplication` accepts fresh activation
 notifications or the current frontmost application without calling
-`WindowBackend`. `ActivationLogic` uses private `application` and `window` job
-domains. Its `applicationDeadline` records `native-timeout`, while the window
-domain retains the yabai watchdog, breaker, queue cap, and one-shot retry.
+`WindowBackend`. It condition-polls AppKit every 50 ms for up to 10 seconds
+because `NSWorkspace.openApplication` can complete before a cold application
+becomes frontmost. `ActivationLogic` uses private `application` and `window`
+job domains. Its `applicationDeadline` records `native-timeout`, while the
+window domain retains the yabai watchdog, breaker, queue cap, and one-shot
+retry.
 
 The deterministic test fixtures are `MockApplicationWorkspace`,
 `MockAppLauncher`, `MockWindowBackend`, and `MockOutcomeVerifier`.
 `MockApplicationWorkspace` controls bundle URL resolution, open results,
 frontmost identity, and activation notifications. `MockAppLauncher` controls
 result-bearing activation and deferred callbacks for timeout, ordering, and
-supersession tests. On 2026-08-28, `make clean && make test` passed 183 tests in
-14 suites, including the native telemetry paths.
+supersession tests. On 2026-08-28, `make test` passed 184 tests in 14 suites,
+including a regression where Passwords becomes frontmost after the initial
+verification delay.
 
 ## Failure Behavior
 
@@ -361,6 +365,9 @@ supersession tests. On 2026-08-28, `make clean && make test` passed 183 tests in
   in telemetry.
 - Native callback timeout: record `native-timeout`; release the application
   domain without yabai backoff or retry.
+- Delayed foreground activation after a successful native callback: keep the
+  application verification pending for up to 10 seconds, then record
+  `wrong-window` only if AppKit still lacks matching activation evidence.
 - Reopen command failure: record `failed` from the `osascript` exit status.
 - Yabai hang during same-app navigation: retain the existing watchdog,
   backoff, queue cap, and one-shot focus retry.
@@ -392,6 +399,8 @@ The Swift suite must prove:
 - Invalid configured bundle identifiers fail without name fallback.
 - Application verification uses the workspace adapter and never queries
   yabai.
+- Application verification does not record `wrong-window` while a cold native
+  activation is still within its bounded foreground wait.
 - Burst coalescing and activation notifications produce deterministic
   `ok-app`, `wrong-window`, `failed`, `native-timeout`, and
   `unverified-burst` records.

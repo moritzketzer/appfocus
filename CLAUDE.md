@@ -90,9 +90,11 @@ Every command produces one JSONL record in
 `~/.local/state/appfocus/telemetry.jsonl` (5 MB rotation to `.1`):
 intended target, path taken (`hot|confirm|native-bundle|legacy-name|native-axless|reopen|retry|noop`),
 phase timings (`decide`/`act`/`total`/`verify` ms), and a VERIFIED on-screen
-outcome. Application targets use AppKit activation notifications plus the
-frontmost application and make zero yabai calls. Window targets run one
-coalesced `queryAllWindows` about 350 ms after completion and classify
+outcome. Application targets condition-poll AppKit activation notifications
+plus the frontmost application for up to 10 seconds and make zero yabai calls.
+This wait covers cold launches whose open callback precedes foreground
+activation. Window targets run one coalesced `queryAllWindows` about 350 ms
+after completion and classify
 `ok` / `ok-app` / `invisible` /
 `wrong-window` / `failed` / `noop`, plus `superseded`/`dropped-*`/`timeout`
 recorded at their sites and `unverified-burst` for coalesced-away presses.
