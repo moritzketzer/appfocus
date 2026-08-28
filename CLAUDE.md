@@ -131,6 +131,6 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 180 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 182 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a specific test: not supported — `make test` runs all tests.
