@@ -316,6 +316,41 @@ owner. Deployment verification checks the live value remains `1`.
 The architecture atlas needs no update. This change keeps the documented host,
 service, trust, state, configuration, deployment, and recovery owners intact.
 
+## As-Built Source State
+
+The source implementation matches the native boundary in this specification.
+`ApplicationWorkspace.swift` defines `ApplicationIdentity`,
+`ApplicationWorkspace`, and `SystemApplicationWorkspace`. The system adapter
+uses `NSWorkspace.urlForApplication(withBundleIdentifier:)`,
+`openApplication(at:configuration:completionHandler:)`,
+`frontmostApplication`, and `didActivateApplicationNotification`. The daemon
+constructs one adapter and shares it with `DefaultAppLauncher`,
+`OutcomeVerifier`, and `ActivationLogic`.
+
+`AppLauncher.swift` defines `ApplicationActionPath`,
+`ApplicationActionResult`, the `AppLauncher` protocol, and
+`DefaultAppLauncher`. `activate(appName:bundleIdentifier:completion:)` uses
+AppKit for configured bundle identifiers and `/usr/bin/open -a` only when the
+identifier is absent. `reopen(appName:strategy:completion:)` reports the
+`osascript` exit status. The former `ProcessChecker.swift` file and its protocol
+adapters are absent.
+
+`CommandTrace` exposes an atomic `VerificationTarget` snapshot containing the
+target kind, canonical app, bundle identifier, window identifier, and action
+timestamp. `OutcomeVerifier.classifyApplication` accepts fresh activation
+notifications or the current frontmost application without calling
+`WindowBackend`. `ActivationLogic` uses private `application` and `window` job
+domains. Its `applicationDeadline` records `native-timeout`, while the window
+domain retains the yabai watchdog, breaker, queue cap, and one-shot retry.
+
+The deterministic test fixtures are `MockApplicationWorkspace`,
+`MockAppLauncher`, `MockWindowBackend`, and `MockOutcomeVerifier`.
+`MockApplicationWorkspace` controls bundle URL resolution, open results,
+frontmost identity, and activation notifications. `MockAppLauncher` controls
+result-bearing activation and deferred callbacks for timeout, ordering, and
+supersession tests. On 2026-08-28, `make clean && make test` passed 180 tests in
+14 suites, including the native telemetry paths.
+
 ## Failure Behavior
 
 - Unknown configured bundle identifier: record `failed` with the bundle

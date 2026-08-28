@@ -60,6 +60,16 @@ struct TelemetryStatsTests {
         #expect(out.contains("non-ok"))
     }
 
+    @Test func nativePathsRemainDecidedSuccesses() {
+        let out = TelemetryStats.aggregate(lines: [
+            line(outcome: "ok-app", path: "native-bundle", total: 80),
+            line(outcome: "ok-app", path: "legacy-name", total: 90),
+            line(outcome: "ok-app", path: "native-axless", total: 100),
+        ])
+        #expect(out.contains("100.0% (3/3 decided)"))
+        #expect(out.contains("other paths   : n=3"))
+    }
+
     @Test func parseSinceHandlesUnits() {
         #expect(TelemetryStats.parseSince("30m") == 1800)
         #expect(TelemetryStats.parseSince("2h") == 7200)

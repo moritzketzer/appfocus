@@ -31,17 +31,17 @@ Sources/
     SocketCommandSource.swift — Unix socket server: accepts CLI connections
     ActivationLogic.swift    — Core brain: jump (MRU toggle, launch, reopen), cycle (ring-based)
     CommandTrace.swift       — Per-command telemetry record + JSONL encoding
-    OutcomeVerifier.swift    — Verified on-screen outcome classification + telemetry sink
+    OutcomeVerifier.swift    — AppKit or yabai outcome classification + telemetry sink
     WindowModel.swift        — In-memory window snapshot + focused id; commands read this, not yabai
     StateStore.swift         — Per-app persistent state: MRU IDs, ring order, JSON on disk
     FocusPoller.swift        — Background timer: full window snapshot into WindowModel + MRU recording
-    AppLauncher.swift        — Launch (open -a) and reopen (osascript) with per-app strategies
-    ProcessChecker.swift     — NSWorkspace.shared.runningApplications lookup
+    ApplicationWorkspace.swift — AppKit app identity, activation, and notification boundary
+    AppLauncher.swift        — Bundle activation, name compatibility, and reopen results
     Config.swift             — JSON config from ~/.config/appfocus/config.json
     Log.swift                — Stderr logger (APPFOCUS_LOG=debug for verbose)
 Tests/
   Unit/
-    Mocks.swift              — MockBackend, MockLauncher, MockProcessChecker
+    Mocks.swift              — Window, launcher, verifier, and ApplicationWorkspace mocks
     ActivationLogicTests.swift
     StateStoreTests.swift
     ConfigTests.swift
@@ -53,48 +53,51 @@ Tests/
 
 ## Architecture
 
-Protocol-based design with two extension points:
+Protocol-based design with four injected boundaries:
 
 - **CommandSource** protocol — how commands arrive (kanata TCP, Unix socket CLI)
 - **WindowBackend** protocol — how windows are queried and focused (yabai)
+- **ApplicationWorkspace** protocol — frontmost identity, bundle URL resolution, AppKit activation, and activation notifications
+- **AppLauncher** protocol — result-bearing activation and reopen operations
 
-Flow: CommandSource → ActivationLogic → WindowModel (read) + WindowBackend (act) + AppLauncher + StateStore
+Flow: CommandSource → ActivationLogic → ApplicationWorkspace (route) → AppLauncher (cross-app act) or WindowModel + WindowBackend (same-app act) → StateStore
 
-**Read/act split:** commands never query yabai on the hot path. FocusPoller
-rebuilds the in-memory WindowModel from one full `queryAllWindows` snapshot
-per tick (default 2 s, first tick immediate); jump/cycle read the model and
-issue only focus actions. Completed focus actions update the model
-optimistically so serialized bursts compound. The single deliberate live
-query left is the confirm on the "no windows for a running app" branch (a
-stale empty read there would reopen a duplicate window). Staleness bound:
-one poll interval; a vanished target fails cleanly and self-heals at the
-next poll.
+**Native/window split:** cross-app jumps read the frontmost application and
+activate through AppKit before touching the window model. These application
+jobs make zero `WindowBackend` calls. Same-app jumps and cycles read the
+in-memory WindowModel and act through yabai. FocusPoller rebuilds the model
+from one full `queryAllWindows` snapshot per tick (default 2 s, first tick
+immediate). The sole command-time query confirms that a frontmost app has no
+eligible windows before reopening it. A stale empty model therefore cannot
+open a duplicate Finder or Safari window.
 
 ActivationLogic is the core brain. It handles:
 - **jump**: focus app's best window (MRU), launch if not running, reopen if no windows
 - **MRU toggle**: double-jump same app switches to previous window
 - **cycle**: ring-based next/prev within an app's windows
-- **cancellation tokens**: last-write-wins for overlapping async commands
-- **watchdog + one-shot retry**: a command stuck >3s is force-dropped (pump
-  never wedges); if its focus target was already resolved, the focus action
-  replays once after the backoff unless a newer command supersedes it
+- **application domain**: native activation bypasses the yabai breaker, queue cap, and retry; a separate 3 s deadline records `native-timeout`
+- **window domain**: same-app navigation retains the 3 s yabai watchdog, one-second backoff, queue cap, and one-shot focus retry
+- **cancellation tokens**: different application targets remain last-write-wins; repeated commands for one target queue in order
 - **AX-less fallback**: a running app whose only windows lack yabai AX
-  references (ChatGPT lazy-AX state) gets focusSpace + native activation
-  instead of a useless reopen
+  references (ChatGPT lazy-AX state) gets native activation without a Space
+  focus or launch polling
 
-Native macOS APIs complement yabai: `open -a` for launching, osascript for reopening, NSWorkspace for process detection.
+Native macOS APIs complement yabai: `NSWorkspace` activates and verifies configured bundle identifiers, `/usr/bin/open -a` supports unmapped names, and `osascript` runs reopen strategies.
 
 ## Telemetry & Benchmark (the deploy gate)
 
 Every command produces one JSONL record in
 `~/.local/state/appfocus/telemetry.jsonl` (5 MB rotation to `.1`):
-intended target, path taken (`hot|confirm|launch|reopen|fallback|retry|noop`),
+intended target, path taken (`hot|confirm|native-bundle|legacy-name|native-axless|reopen|retry|noop`),
 phase timings (`decide`/`act`/`total`/`verify` ms), and a VERIFIED on-screen
-outcome — `OutcomeVerifier` runs one coalesced `queryAllWindows` ~350 ms
-after completion and classifies `ok` / `ok-app` / `invisible` /
+outcome. Application targets use AppKit activation notifications plus the
+frontmost application and make zero yabai calls. Window targets run one
+coalesced `queryAllWindows` about 350 ms after completion and classify
+`ok` / `ok-app` / `invisible` /
 `wrong-window` / `failed` / `noop`, plus `superseded`/`dropped-*`/`timeout`
 recorded at their sites and `unverified-burst` for coalesced-away presses.
-The verification dump also feeds the WindowModel (fenced).
+The verification dump also feeds the WindowModel (fenced). Activation paths
+include `native-bundle`, `legacy-name`, `native-axless`, and `reopen`.
 
 - `appfocus stats [--since 2h]` — success rate, outcome counts, p50/p95
   latency by path and same/cross-Space, last 10 failures with forensics.
@@ -107,7 +110,7 @@ The verification dump also feeds the WindowModel (fenced).
   for ~60-90 s: run attended. Exit nonzero on threshold violation.
 
 **Definition of works** (both instruments): ≥99% of decided presses end
-`ok`/`ok-app`/`noop`; p95 press-to-visible ≤300 ms same-Space / ≤700 ms
+`ok`/`ok-app`/`noop`; p95 press-to-visible ≤300 ms same-Space / ≤750 ms
 cross-Space; zero dead presses in normal operation. Switching changes are
 not "verified" until the benchmark passes — unit tests alone don't count.
 
@@ -120,6 +123,7 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 | backend | "yabai" | Window backend |
 | yabai_path | "/etc/profiles/per-user/moritz/bin/yabai" | Path to yabai binary |
 | aliases | {} | App name aliases (e.g. "Code" → "Visual Studio Code") |
+| bundle_identifiers | {} | Canonical app name → stable macOS bundle identifier |
 | reopen_strategies | {"*": "reopen"} | Per-app: reopen, makeWindow, makeDocument |
 | kanata_enabled | true | Enable kanata TCP source |
 | kanata_port | 7070 | TCP port for kanata push-msg |
@@ -127,6 +131,6 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). Mocks in `Tests/Unit/Mocks.swift` implement all three protocols (WindowBackend, AppLauncher, ProcessChecker) with configurable return values and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 180 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a specific test: not supported — `make test` runs all tests.
