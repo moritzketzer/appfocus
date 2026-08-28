@@ -304,8 +304,8 @@ owner. Deployment verification checks the live value remains `1`.
 - `Tests/Unit/*`: mocks and focused behavior, config, verifier, launcher, pump,
   and telemetry tests.
 - `README.md` and `CLAUDE.md`: current native-first architecture and config.
-- `_changes/2026-08-28-native-app-activation/`: canonical spec, plan, lifecycle,
-  and final as-built record.
+- `_changes/_archive/2026-08-28-native-app-activation/`: canonical spec, plan,
+  lifecycle, and final as-built record.
 
 ### Nix-Config Repository
 
@@ -334,6 +334,12 @@ uses `NSWorkspace.urlForApplication(withBundleIdentifier:)`,
 constructs one adapter and shares it with `DefaultAppLauncher`,
 `OutcomeVerifier`, and `ActivationLogic`.
 
+`main.swift` enters Cocoa's main run loop through `RunLoop.main.run()`. A
+paired live probe established the requirement. The `dispatchMain()` variant
+received zero `NSWorkspace` activation notifications and retained stale
+foreground state. The Cocoa run-loop variant received activation notifications
+and returned the current foreground application.
+
 `AppLauncher.swift` defines `ApplicationActionPath`,
 `ApplicationActionResult`, the `AppLauncher` protocol, and
 `DefaultAppLauncher`. `activate(appName:bundleIdentifier:completion:)` uses
@@ -360,10 +366,11 @@ The deterministic test fixtures are `MockApplicationWorkspace`,
 `MockApplicationWorkspace` controls bundle URL resolution, open results,
 frontmost identity, and activation notifications. `MockAppLauncher` controls
 result-bearing activation and deferred callbacks for timeout, ordering, and
-supersession tests. On 2026-08-28, `make test` passed 186 tests in 14 suites,
-including regressions where Passwords becomes frontmost after the initial
-verification delay and where a newer action lands while an older application
-poll or window query is already in flight.
+supersession tests. On 2026-08-28, three consecutive
+`make clean && make all && make test` runs passed 186 tests in 14 suites. The
+suite times were 9.569 s, 9.585 s, and 10.117 s. The compiler emitted no
+diagnostics. The regressions include delayed Passwords foregrounding and a
+newer action landing during an older application poll or window query.
 
 ## Failure Behavior
 
@@ -461,6 +468,22 @@ nix-config primary checkout. Verify:
 The foreground acceptance run records the starting frontmost application and
 Space, warns Moritz immediately before moving focus, and restores both after
 the run.
+
+## As-Built Verification
+
+| Check | Final Evidence |
+|---|---|
+| Implementation revisions | Appfocus implementation commit `0bcf23a02090752bba53eff6e7678a3250cae8a3`; nix-config pin and deployment commit `0c09c233ae31d8b04998ee288edd29604d275fe8`. |
+| Lifecycle root cause | A paired live probe reproduced stale `NSWorkspace` state and zero activation notifications under `dispatchMain()`. Replacing it with `RunLoop.main.run()` produced current foreground state and activation notifications. |
+| Source build and tests | Three clean build-and-test runs passed 186 tests in 14 suites. Suite times were 9.569 s, 9.585 s, and 10.117 s, with no compiler diagnostics. |
+| Independent review | Zeno reviewed exact implementation head `0bcf23a02090752bba53eff6e7678a3250cae8a3` and reported no Critical, Important, or Minor findings. |
+| Darwin prewarm | The focused package prewarm completed on the Macserver and imported `/nix/store/jfwnppx9jmrx4vsyc8ycl49x59m1qg2k-appfocus-0.1.0` on the MacBook. `just switch` then built and deployed the full MacBook system. |
+| Live deployment | `darwin-version --json` reported configuration revision `0c09c233ae31d8b04998ee288edd29604d275fe8`. LaunchAgent `gui/501/local.appfocus` ran the expected store executable, its socket answered `appfocus status`, and `workspaces-auto-swoosh` remained `1`. |
+| Foreground acceptance | Passwords passed 10/10 cold-and-warm jumps. Same-Space application jumps passed 30/30 at 40 ms p95; cross-Space jumps passed 30/30 at 535 ms p95. All 80 controlled native telemetry records were `ok-app`, with zero forbidden outcomes. The harness restored `com.cmuxterm.app`, Space 1, window 678. |
+
+The final Nix run still emitted two `stdenv.isLinux` and one
+`stdenv.isDarwin` deprecation warnings from unchanged code. Their owner is
+outside this specification.
 
 ## Rollout and Reversal
 

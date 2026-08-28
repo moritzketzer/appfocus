@@ -1,4 +1,5 @@
 created: 2026-08-28
+status: archived
 history:
   - date: 2026-08-28
     event: created
@@ -31,3 +32,11 @@ history:
     session: 01a0476b-25ae-77a0-a053-104e6906eea1
     tool: codex
     branch: change/native-app-activation
+  - date: 2026-08-28
+    event: completed
+    session: 01a0476b-25ae-77a0-a053-104e6906eea1
+    tool: codex
+  - date: 2026-08-28
+    event: archived
+    session: 01a0476b-25ae-77a0-a053-104e6906eea1
+    tool: codex
