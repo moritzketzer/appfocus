@@ -233,6 +233,11 @@ Different application targets remain last-write-wins. Repeated commands for
 the same target queue in order. Late callbacks retain the existing token fence
 and cannot advance the pump twice.
 
+The command keeps the domain chosen when it entered the pump. Any repeated
+press that arrives before the target becomes frontmost remains an application
+job. A press received after the target becomes frontmost enters the window
+domain and keeps the existing MRU behavior.
+
 ## Outcome Verification and Telemetry
 
 `CommandTrace` records an explicit verification target:
@@ -346,7 +351,7 @@ The Swift suite must prove:
 - An application timeout neither arms retry nor starts yabai backoff.
 - AX-less frontmost applications use native activation without `focusSpace` or
   post-action polling.
-- Launch and reopen paths perform no 200 ms window polling.
+- Native activation and reopen paths perform no 200 ms window polling.
 - Same-application MRU, `next`, `prev`, explicit Space focus, supersession, and
   one-shot retry behavior remain unchanged.
 - Invalid configured bundle identifiers fail without name fallback.
@@ -409,8 +414,8 @@ remain readable.
 
 Rollback reverts the nix-config pin and config commit to appfocus revision
 `b3b0ee66d8052fa34621f826b255f55671d1d401`, then runs `just switch`. The old
-decoder ignores no required new state because `bundle_identifiers` lives only
-in config, and the old binary can read the remaining fields unchanged.
+binary needs no migrated state because `bundle_identifiers` lives only in the
+new config. It can decode the remaining fields unchanged.
 
 ## Non-Scope
 

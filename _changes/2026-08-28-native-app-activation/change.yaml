@@ -8,3 +8,13 @@ history:
     event: spec-written
     session: 01a0476b-25ae-77a0-a053-104e6906eea1
     tool: codex
+  - date: 2026-08-28
+    event: ship-authorized
+    session: 01a0476b-25ae-77a0-a053-104e6906eea1
+    tool: codex
+    publication: bundled
+    reason: >-
+      Moritz used the exact standalone ship trigger after reviewing the
+      concrete native-first app activation design in this session. Execution
+      continues through plan, implementation, review, publication, deployment,
+      acceptance, and archive in the current bounded run.
