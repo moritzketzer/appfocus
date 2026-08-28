@@ -262,11 +262,13 @@ final class ActivationLogic {
         if let (nextToken, job) = next { runJob(nextToken, job) }
     }
 
-    /// Force-release the pump when a command overran the deadline (yabai hung).
-    /// Bumps the token so the wedged command's late callbacks bail, drops the
-    /// backlog, and backs off so the next presses don't immediately re-hammer a
-    /// still-hung yabai.
+    /// Force-release the window domain when a command overran the deadline
+    /// (yabai hung). Bumps the token so the wedged command's late callbacks
+    /// bail, drops queued window work, promotes queued native work, and backs
+    /// off so later window presses don't immediately re-hammer a still-hung
+    /// yabai.
     private func watchdogFire(_ token: UInt64) {
+        var next: (UInt64, PumpJob)?
         var fired = false
         var armed = false
         var timedOut: [CommandTrace] = []
@@ -278,30 +280,45 @@ final class ActivationLogic {
                 cur.update { $0.outcome = "timeout" }
                 timedOut.append(cur)
             }
+            let hasNewerIntent = !pending.isEmpty
+            var retainedApplications: [PumpJob] = []
             for dropped in pending {
-                dropped.trace.update {
-                    $0.outcome = "dropped-cap"
-                    $0.detail = "backlog dropped by watchdog"
+                if dropped.domain == .application {
+                    retainedApplications.append(dropped)
+                } else {
+                    dropped.trace.update {
+                        $0.outcome = "dropped-cap"
+                        $0.detail = "backlog dropped by watchdog"
+                    }
+                    timedOut.append(dropped.trace)
                 }
-                timedOut.append(dropped.trace)
             }
-            pending.removeAll()
-            running = false
-            runningDomain = nil
-            runningApp = nil
-            runningTrace = nil
+            pending = retainedApplications
             hungUntil = DispatchTime.now() + self.hungBackoff
             fired = true
-            if let f = inFlightTarget, f.token == token {
+            if !hasNewerIntent, let f = inFlightTarget, f.token == token {
                 pendingRetry = f.target
                 armed = true
             }
             inFlightTarget = nil
+            if pending.isEmpty {
+                running = false
+                runningDomain = nil
+                runningApp = nil
+                runningTrace = nil
+            } else {
+                let job = pending.removeFirst()
+                runningDomain = job.domain
+                runningApp = job.app
+                runningTrace = job.trace
+                next = (currentToken, job)
+            }
         }
         for t in timedOut { verifier.recordImmediate(t) }
         if fired {
-            Log.error("pump: WATCHDOG tok=\(token) exceeded \(self.commandDeadline)s — yabai unresponsive; released + backing off \(self.hungBackoff)s")
+            Log.error("pump: WATCHDOG tok=\(token) exceeded \(self.commandDeadline)s — yabai unresponsive; released window domain + backing off \(self.hungBackoff)s")
         }
+        if let (nextToken, job) = next { runJob(nextToken, job) }
         if armed {
             // Fire just past the backoff window so the resubmission is not
             // dropped by the circuit breaker.

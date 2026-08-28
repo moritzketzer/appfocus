@@ -675,6 +675,37 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowIds.last == 7)
     }
 
+    @Test func windowWatchdogPromotesQueuedNativeIntent() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.logic.hungBackoff = 0.0
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+        h.backend.focusSpaceCompletesImmediately = false
+        h.launcher.activationCompletesImmediately = false
+
+        h.logic.jump(appName: "Passwords")
+        h.logic.cycle(direction: .next)
+        h.logic.jump(appName: "Passwords")
+        h.settle(ms: 50_000)
+        #expect(h.launcher.activationCalls.count == 1)
+
+        h.launcher.activationCompletesImmediately = true
+        #expect(h.launcher.completeNextActivation())
+        h.settle(ms: 50_000)
+        #expect(h.backend.focusedSpaces.count == 1)
+
+        h.logic.fireWatchdogNowForTesting()
+        h.settle(ms: 2_500_000)
+
+        #expect(h.launcher.activationCalls.count == 2)
+        #expect(!h.telemetry.all.contains {
+            $0.app == "Passwords" && $0.outcome == "dropped-cap"
+        })
+        #expect(h.backend.focusedSpaces.count == 1)
+        #expect(h.logic.isIdleForTesting)
+    }
+
     @Test func differentNativeTargetsRemainLastWriteWins() {
         let h = Harness(bundles: [
             "Passwords": "com.apple.Passwords",
