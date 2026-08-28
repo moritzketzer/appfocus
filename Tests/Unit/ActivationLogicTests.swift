@@ -32,7 +32,6 @@ private struct Harness: @unchecked Sendable {
     let launcher: MockAppLauncher
     let store: StateStore
     let model: WindowModelStore
-    let processChecker: MockProcessChecker
     let telemetry: MockOutcomeVerifier
     let logic: ActivationLogic
 
@@ -52,13 +51,9 @@ private struct Harness: @unchecked Sendable {
         launcher = MockAppLauncher()
         store = StateStore(stateDir: dir)
         model = WindowModelStore()
-        processChecker = MockProcessChecker()
         telemetry = MockOutcomeVerifier()
-        // All apps default to "running" so existing tests keep working
-        processChecker.runningApps = ["Safari", "Visual Studio Code", "Other"]
         logic = ActivationLogic(config: config, backend: backend,
                                  launcher: launcher, store: store,
-                                 processChecker: processChecker,
                                  workspace: workspace, model: model,
                                  verifier: telemetry)
         // Disable the hung-yabai watchdog by default: tests that defer mock
@@ -211,19 +206,6 @@ struct ActivationLogicTests {
         #expect(h.backend.focusedWindowIds.contains(1))
     }
 
-    @Test func jumpConfirmedNoWindowsReopens() {
-        let h = Harness()
-        h.processChecker.runningApps = ["Safari"]
-        h.backend.windows = []
-        h.sync()
-
-        h.logic.jump(appName: "Safari")
-        h.settle()
-
-        #expect(h.backend.queryAllWindowsCallCount >= 1)
-        #expect(h.launcher.reopenedApps.count == 1)
-    }
-
     @Test func staleModelTargetGoneFromBackendFailsCleanly() {
         // The model still believes window 5 exists after it closed. The
         // command must complete cleanly and leave the pump idle; the next
@@ -245,7 +227,6 @@ struct ActivationLogicTests {
         // read as "no windows": reopening on it would create a duplicate
         // window. The press is dropped; the pump stays healthy.
         let h = Harness()
-        h.processChecker.runningApps = ["Safari"]
         h.backend.windows = [win(1)]
         h.backend.queryAllWindowsFails = true
         // model empty → confirm path → failure
@@ -254,7 +235,7 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.launcher.reopenedApps.isEmpty)
-        #expect(h.launcher.launchedApps.isEmpty)
+        #expect(h.launcher.activationCalls.isEmpty)
         #expect(h.backend.focusedWindowIds.isEmpty)
         #expect(h.logic.isIdleForTesting)
     }
@@ -337,22 +318,6 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.focusCalls == ["space:1", "window:1"])
-    }
-
-    @Test func launchedWindowAcrossSpacesFocusesSpaceBeforeWindow() {
-        let h = Harness()
-        h.processChecker.runningApps = []
-        h.backend.windows = []
-        h.backend.focusedWin = win(99, app: "Other", space: 1)
-        h.sync()
-
-        h.logic.jump(appName: "Safari")
-        h.backend.windows = [win(1, space: 2)]
-        // Poll for the launch/pollForWindow chain instead of a fixed sleep, so
-        // the real 0.2s poll timer isn't raced by parallel-test CPU load.
-        for _ in 0..<100 where h.backend.focusCalls.count < 2 { usleep(50_000) }
-
-        #expect(h.backend.focusCalls == ["space:2", "window:1"])
     }
 
     // MARK: - Jump: already focused → cycle
@@ -450,7 +415,6 @@ struct ActivationLogicTests {
                              win(2, app: "Obsidian", space: 5)]
         h.backend.focusedWin = win(1, app: "Safari", space: 1)
         h.sync()
-        h.processChecker.runningApps.insert("Obsidian")
         h.backend.focusSpaceCompletesImmediately = false
 
         h.workspace.frontmostApplication = ApplicationIdentity(
@@ -576,7 +540,6 @@ struct ActivationLogicTests {
         h.backend.focusedWin = win(1, app: "cmux")
         h.sync()
         h.backend.focusWindowCompletesImmediately = false
-        h.processChecker.runningApps.insert("cmux")
         h.store.update(appName: "cmux") { state in
             state.ring = [1, 2]
         }
@@ -770,7 +733,6 @@ struct ActivationLogicTests {
         h.backend.focusedWin = win(1, app: "cmux")
         h.sync()
         h.backend.focusWindowCompletesImmediately = false
-        h.processChecker.runningApps.insert("cmux")
         h.workspace.frontmostApplication = ApplicationIdentity(
             bundleIdentifier: nil, localizedName: "cmux")
 
@@ -806,8 +768,6 @@ struct ActivationLogicTests {
             h.backend.focusedWin = wins.first
             h.sync()
             h.backend.focusWindowCompletesImmediately = false
-            for app in apps { h.processChecker.runningApps.insert(app) }
-
             let commands = Int.random(in: 1...12, using: &rng)
             for _ in 0..<commands {
                 switch Int.random(in: 0...3, using: &rng) {
@@ -1190,103 +1150,94 @@ struct ActivationLogicTests {
         #expect(h.logic.isIdleForTesting)
     }
 
-    // MARK: - AX-less window fallback (ChatGPT Chromium lazy-AX state)
+    // MARK: - Frontmost application slow paths
 
-    @Test func jumpFallsBackToNativeActivationForAXlessWindows() {
-        let h = Harness()
-        h.processChecker.runningApps = ["ChatGPT"]
+    @Test func axlessFrontmostAppUsesNativeActivationWithoutSpaceFocusOrPolling() {
+        let h = Harness(bundles: ["ChatGPT": "com.openai.codex"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.openai.codex", localizedName: "ChatGPT")
         h.backend.windows = [win(40, app: "ChatGPT", space: 4,
                                  subrole: "", role: "", ax: false)]
-        // model not synced — confirm branch runs and sees the AX-less window
-        h.workspace.frontmostApplication = ApplicationIdentity(
-            bundleIdentifier: nil, localizedName: "ChatGPT")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .nativeBundle,
+            bundleIdentifier: "com.openai.codex", detail: nil)
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
 
-        #expect(h.backend.focusCalls == ["space:4"])
-        #expect(h.launcher.activatedApps == ["ChatGPT"])
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.backend.focusCalls.isEmpty)
+        #expect(h.launcher.activationCalls == [ApplicationActivationCall(
+            appName: "ChatGPT", bundleIdentifier: "com.openai.codex")])
         #expect(h.launcher.reopenedApps.isEmpty)
-        #expect(h.backend.focusedWindowIds.isEmpty)
-        #expect(h.store.stateIfCached(for: "ChatGPT")?.lastFocusedId == nil)
-        #expect(h.logic.isIdleForTesting)
+        #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
+        #expect(h.telemetry.verified.first?.path == "native-axless")
     }
 
-    @Test func stickyOverlayOnlyStillReopens() {
-        let h = Harness()
-        h.processChecker.runningApps = ["ChatGPT"]
+    @Test func frontmostWindowlessAppReopensWithoutPolling() {
+        let h = Harness(
+            strategies: ["Safari": .makeDocument],
+            bundles: ["Safari": "com.apple.Safari"])
+        h.backend.windows = []
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.launcher.reopenedApps.first?.0 == "Safari")
+        #expect(h.launcher.reopenedApps.first?.1 == .makeDocument)
+        #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
+        #expect(h.telemetry.verified.first?.path == "reopen")
+    }
+
+    @Test func frontmostWindowlessReopenFailureRecordsImmediately() {
+        let h = Harness(bundles: ["Safari": "com.apple.Safari"])
+        h.backend.windows = []
+        h.launcher.reopenResult = ApplicationActionResult(
+            success: false, path: .reopen,
+            bundleIdentifier: nil, detail: "osascript failed")
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.telemetry.immediate.first?.outcome == "failed")
+        #expect(h.telemetry.immediate.first?.detail == "osascript failed")
+    }
+
+    @Test func stickyOverlayOnlyStillReopensWithoutPolling() {
+        let h = Harness(bundles: ["ChatGPT": "com.openai.codex"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.openai.codex", localizedName: "ChatGPT")
         h.backend.windows = [win(41, app: "ChatGPT", subrole: "AXDialog",
                                  sticky: true, floating: true)]
-        h.workspace.frontmostApplication = ApplicationIdentity(
-            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
 
-        #expect(h.launcher.activatedApps.isEmpty)
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.launcher.activationCalls.isEmpty)
+        #expect(h.backend.focusCalls.isEmpty)
         #expect(h.launcher.reopenedApps.count == 1)
+        #expect(h.telemetry.verified.first?.path == "reopen")
     }
 
     @Test func stickyAXlessOverlayIsNotAFallbackCandidate() {
-        // A sticky overlay that ALSO lost its AX reference must still route
-        // to reopen: sticky windows are never valid jump destinations, with
-        // or without an AX ref.
-        let h = Harness()
-        h.processChecker.runningApps = ["ChatGPT"]
+        let h = Harness(bundles: ["ChatGPT": "com.openai.codex"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.openai.codex", localizedName: "ChatGPT")
         h.backend.windows = [win(42, app: "ChatGPT", subrole: "",
                                  sticky: true, floating: true,
                                  role: "", ax: false)]
-        h.workspace.frontmostApplication = ApplicationIdentity(
-            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
 
-        #expect(h.launcher.activatedApps.isEmpty)
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+        #expect(h.launcher.activationCalls.isEmpty)
         #expect(h.backend.focusedSpaces.isEmpty)
         #expect(h.launcher.reopenedApps.count == 1)
-    }
-
-    // MARK: - Jump: process checker branches
-
-    @Test func jumpNotRunningLaunchesApp() {
-        let h = Harness()
-        h.processChecker.runningApps = []  // nothing running
-        h.backend.windows = []
-        h.backend.focusedWin = nil
-        h.sync()
-
-        h.logic.jump(appName: "Safari")
-        h.settle()
-
-        #expect(h.launcher.launchedApps == ["Safari"])
-    }
-
-    @Test func jumpRunningNoWindowsReopens() {
-        let h = Harness()
-        h.processChecker.runningApps = ["Safari"]
-        h.backend.windows = []
-        h.backend.focusedWin = nil
-        h.sync()
-
-        h.logic.jump(appName: "Safari")
-        h.settle()
-
-        #expect(h.launcher.reopenedApps.count == 1)
-        #expect(h.launcher.reopenedApps.first?.0 == "Safari")
-    }
-
-    @Test func jumpRunningNoWindowsUsesConfiguredStrategy() {
-        let h = Harness(strategies: ["Safari": .makeWindow])
-        h.processChecker.runningApps = ["Safari"]
-        h.backend.windows = []
-        h.backend.focusedWin = nil
-        h.sync()
-
-        h.logic.jump(appName: "Safari")
-        h.settle()
-
-        #expect(h.launcher.reopenedApps.first?.1 == .makeWindow)
+        #expect(h.telemetry.verified.first?.path == "reopen")
     }
 
     // MARK: - MRU toggle stability
@@ -1346,23 +1297,6 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Safari")
         h.settle()
         #expect(h.backend.focusedWindowIds.last == 2)
-    }
-
-    // MARK: - Alias-aware jump with process checker
-
-    @Test func jumpAliasNotRunningLaunchesCanonicalName() {
-        let h = Harness(aliases: ["Code": "Visual Studio Code"])
-        h.processChecker.runningApps = []
-        h.backend.windows = []
-        h.backend.focusedWin = nil
-        h.sync()
-        h.workspace.frontmostApplication = ApplicationIdentity(
-            bundleIdentifier: nil, localizedName: "Visual Studio Code")
-
-        h.logic.jump(appName: "Code")
-        h.settle()
-
-        #expect(h.launcher.launchedApps == ["Visual Studio Code"])
     }
 
     // MARK: - Cycle updates lastFocusedId

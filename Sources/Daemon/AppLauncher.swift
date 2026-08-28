@@ -30,13 +30,6 @@ protocol AppLauncher {
         strategy: ReopenStrategy,
         completion: @escaping (ApplicationActionResult) -> Void
     )
-
-    // Temporary compatibility surface while ActivationLogic migrates to the
-    // result-bearing operations in this change.
-    func launch(appName: String, completion: @escaping (Bool) -> Void)
-    func activate(appName: String, completion: @escaping () -> Void)
-    func reopen(appName: String, strategy: ReopenStrategy,
-                completion: @escaping () -> Void)
 }
 
 final class DefaultAppLauncher: AppLauncher {
@@ -150,23 +143,6 @@ final class DefaultAppLauncher: AppLauncher {
                     bundleIdentifier: nil,
                     detail: error.localizedDescription))
             }
-        }
-    }
-
-    func launch(appName: String, completion: @escaping (Bool) -> Void) {
-        activate(appName: appName, bundleIdentifier: nil) {
-            completion($0.success)
-        }
-    }
-
-    func activate(appName: String, completion: @escaping () -> Void) {
-        activate(appName: appName, bundleIdentifier: nil) { _ in completion() }
-    }
-
-    func reopen(appName: String, strategy: ReopenStrategy,
-                completion: @escaping () -> Void) {
-        reopen(appName: appName, strategy: strategy) {
-            (_: ApplicationActionResult) in completion()
         }
     }
 

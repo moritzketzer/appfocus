@@ -149,14 +149,6 @@ final class MockOutcomeVerifier: OutcomeVerifying, @unchecked Sendable {
     }
 }
 
-final class MockProcessChecker: ProcessChecker, @unchecked Sendable {
-    var runningApps: Set<String> = []
-
-    func isAppRunning(name: String) -> Bool {
-        runningApps.contains(name)
-    }
-}
-
 /// Mock app launcher that records calls without side effects.
 struct ApplicationActivationCall: Equatable {
     let appName: String
@@ -164,11 +156,8 @@ struct ApplicationActivationCall: Equatable {
 }
 
 final class MockAppLauncher: AppLauncher, @unchecked Sendable {
-    var launchedApps: [String] = []
     var reopenedApps: [(String, ReopenStrategy)] = []
-    var activatedApps: [String] = []
     var activationCalls: [ApplicationActivationCall] = []
-    var launchSuccess = true
     var activationCompletesImmediately = true
     var pendingActivationCompletions: [
         (ApplicationActionResult) -> Void
@@ -210,18 +199,4 @@ final class MockAppLauncher: AppLauncher, @unchecked Sendable {
         completion(reopenResult)
     }
 
-    func launch(appName: String, completion: @escaping (Bool) -> Void) {
-        launchedApps.append(appName)
-        completion(launchSuccess)
-    }
-
-    func activate(appName: String, completion: @escaping () -> Void) {
-        activatedApps.append(appName)
-        completion()
-    }
-
-    func reopen(appName: String, strategy: ReopenStrategy, completion: @escaping () -> Void) {
-        reopenedApps.append((appName, strategy))
-        completion()
-    }
 }

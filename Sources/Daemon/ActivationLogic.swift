@@ -1,5 +1,4 @@
 // Sources/Daemon/ActivationLogic.swift
-import AppKit
 import Foundation
 
 final class ActivationLogic {
@@ -7,7 +6,6 @@ final class ActivationLogic {
     private let backend: WindowBackend
     private let launcher: AppLauncher
     private let store: StateStore
-    private let processChecker: ProcessChecker
     private let workspace: ApplicationWorkspace
     private let model: WindowModelStore
     private let verifier: OutcomeVerifying
@@ -92,7 +90,6 @@ final class ActivationLogic {
 
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
-         processChecker: ProcessChecker,
          workspace: ApplicationWorkspace = SystemApplicationWorkspace(),
          model: WindowModelStore,
          verifier: OutcomeVerifying) {
@@ -100,7 +97,6 @@ final class ActivationLogic {
         self.backend = backend
         self.launcher = launcher
         self.store = store
-        self.processChecker = processChecker
         self.workspace = workspace
         self.model = model
         self.verifier = verifier
@@ -536,7 +532,7 @@ final class ActivationLogic {
                     self.config.resolveAlias($0.appName) == appName
                         && !$0.isMinimized && $0.isAXlessCandidate
                 }
-                self.handleNoWindows(appName: appName, focused: focused,
+                self.handleNoWindows(appName: appName,
                                      axlessCandidates: axless, trace: trace,
                                      token: token, done: done)
             } else {
@@ -548,68 +544,58 @@ final class ActivationLogic {
         }
     }
 
-    private func handleNoWindows(appName: String, focused: WindowInfo?,
+    private func handleNoWindows(appName: String,
                                  axlessCandidates: [WindowInfo],
                                  trace: CommandTrace,
                                  token: UInt64, done: @escaping () -> Void) {
-        // Check if app is running (has process but no windows)
-        let isRunning = processChecker.isAppRunning(name: appName)
+        let bundleIdentifier = config.bundleIdentifier(for: appName)
+        trace.update {
+            $0.verificationTargetKind = .application
+            $0.targetBundleIdentifier = bundleIdentifier
+            $0.decidedAt = .now()
+        }
 
-        if isRunning {
-            // AX-less fallback: the app HAS a would-be-standard window, but
-            // yabai holds no AX reference for it (ChatGPT's lazy-ephemeral
-            // Chromium AX tree), so it cannot be focused via the backend.
-            // Reopening surfaces nothing; switching to the window's Space and
-            // natively activating the app does — and being frontmost on its
-            // own Space is what lets the AX tree materialize.
-            if let target = axlessCandidates.first {
-                Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — native fallback to space \(target.space); tiling needs a warm yabai restart (see gotchas)")
-                trace.update {
-                    $0.path = "fallback"
-                    $0.targetSpace = target.space
-                    $0.crossedSpace = true
-                    $0.decidedAt = .now()
-                }
-                backend.focusSpace(index: target.space) { [self] _ in
-                    guard self.isActive(token) else { done(); return }
-                    launcher.activate(appName: appName) {
-                        trace.update { $0.actionedAt = .now() }
-                        done()
-                    }
-                }
-                return
-            }
-            Log.info("jump: \(appName) running but no windows, reopening")
+        if !axlessCandidates.isEmpty {
+            Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — activating natively; tiling needs a warm yabai restart (see gotchas)")
             trace.update {
-                $0.path = "reopen"
-                $0.decidedAt = .now()
+                $0.path = "native-axless"
             }
-            let strategy = config.reopenStrategy(for: appName)
-            launcher.reopen(appName: appName, strategy: strategy) { [self] in
-                guard self.isActive(token) else { done(); return }
-                self.pollForWindow(appName: appName, focused: focused,
-                                   trace: trace, token: token, done: done)
+            launcher.activate(
+                appName: appName,
+                bundleIdentifier: bundleIdentifier
+            ) { [self] result in
+                self.completeApplicationAction(
+                    result, trace: trace, token: token, done: done)
             }
-        } else {
-            Log.info("jump: \(appName) not running, launching")
-            trace.update {
-                $0.path = "launch"
-                $0.decidedAt = .now()
-            }
-            launcher.launch(appName: appName) { [self] success in
-                guard self.isActive(token), success else {
-                    if !success {
-                        trace.update {
-                            $0.outcome = "failed"
-                            $0.detail = "launch failed"
-                        }
-                    }
-                    done(); return
-                }
-                self.pollForWindow(appName: appName, focused: focused,
-                                   trace: trace, token: token, done: done)
+            return
+        }
+
+        Log.info("jump: \(appName) frontmost without windows, reopening")
+        trace.update { $0.path = "reopen" }
+        launcher.reopen(
+            appName: appName,
+            strategy: config.reopenStrategy(for: appName)
+        ) { [self] result in
+            self.completeApplicationAction(
+                result, trace: trace, token: token, done: done)
+        }
+    }
+
+    private func completeApplicationAction(
+        _ result: ApplicationActionResult,
+        trace: CommandTrace,
+        token: UInt64,
+        done: @escaping () -> Void
+    ) {
+        guard isActive(token) else { done(); return }
+        trace.update {
+            $0.actionedAt = .now()
+            if !result.success {
+                $0.outcome = "failed"
+                $0.detail = result.detail
             }
         }
+        done()
     }
 
     private func handleHasWindows(appName: String, windows: [WindowInfo],
@@ -778,44 +764,6 @@ final class ActivationLogic {
                 Log.info("focus: yabai space focus for \(target.space) failed — continuing to window focus")
             }
             focusTarget()
-        }
-    }
-
-    private static let windowPollMaxAttempts = 15
-    private static let windowPollInterval: TimeInterval = 0.2
-
-    private func pollForWindow(appName: String, focused: WindowInfo?,
-                               trace: CommandTrace,
-                               token: UInt64, attempt: Int = 0,
-                               done: @escaping () -> Void) {
-        guard attempt < Self.windowPollMaxAttempts else {
-            Log.error("jump: timed out waiting for \(appName) window")
-            trace.update {
-                $0.outcome = "failed"
-                $0.detail = "timed out waiting for window after launch/reopen"
-            }
-            done(); return
-        }
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + Self.windowPollInterval) { [self] in
-            guard self.isActive(token) else { done(); return }
-
-            self.backend.queryAllWindows { allWindows in
-                // nil = failed query: keep polling on the next attempt.
-                if let allWindows { self.model.replaceSnapshot(allWindows) }
-                let windows = self.windowsForApp(appName, from: allWindows ?? [])
-                guard self.isActive(token) else { done(); return }
-
-                if let win = windows.first {
-                    Log.info("jump: found window for \(appName) after \(attempt + 1) polls")
-                    self.focusWindow(win, from: focused, trace: trace,
-                                     token: token, done: done)
-                } else {
-                    self.pollForWindow(appName: appName, focused: focused,
-                                       trace: trace, token: token,
-                                       attempt: attempt + 1, done: done)
-                }
-            }
         }
     }
 

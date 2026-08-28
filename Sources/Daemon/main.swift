@@ -12,15 +12,16 @@ let config = AppFocusConfig.load()
 
 // Create components
 let backend = YabaiBackend(yabaiPath: config.yabaiPath)
-let launcher = DefaultAppLauncher()
+let workspace = SystemApplicationWorkspace()
+let launcher = DefaultAppLauncher(workspace: workspace)
 let store = StateStore()
-let processChecker = WorkspaceProcessChecker(config: config)
 let model = WindowModelStore()
-let verifier = OutcomeVerifier(backend: backend, model: model,
+let verifier = OutcomeVerifier(backend: backend, workspace: workspace,
+                                model: model,
                                 resolveAlias: { config.resolveAlias($0) })
 let logic = ActivationLogic(config: config, backend: backend,
                              launcher: launcher, store: store,
-                             processChecker: processChecker, model: model,
+                             workspace: workspace, model: model,
                              verifier: verifier)
 let poller = FocusPoller(backend: backend, store: store, config: config,
                           model: model)
