@@ -348,7 +348,7 @@ The deterministic test fixtures are `MockApplicationWorkspace`,
 `MockApplicationWorkspace` controls bundle URL resolution, open results,
 frontmost identity, and activation notifications. `MockAppLauncher` controls
 result-bearing activation and deferred callbacks for timeout, ordering, and
-supersession tests. On 2026-08-28, `make clean && make test` passed 182 tests in
+supersession tests. On 2026-08-28, `make clean && make test` passed 183 tests in
 14 suites, including the native telemetry paths.
 
 ## Failure Behavior
