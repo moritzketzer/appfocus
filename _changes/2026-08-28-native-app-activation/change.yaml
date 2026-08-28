@@ -26,3 +26,8 @@ history:
     reason: >-
       Same-session execution continues in the authorized appfocus and
       nix-config worktrees; the plan ships with the completed implementation.
+  - date: 2026-08-28
+    event: execution-started
+    session: 01a0476b-25ae-77a0-a053-104e6906eea1
+    tool: codex
+    branch: change/native-app-activation
