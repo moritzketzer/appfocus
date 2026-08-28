@@ -601,6 +601,141 @@ struct ActivationLogicTests {
 
     // MARK: - Resilience to a hung/slow yabai
 
+    @Test func nativeJumpBypassesAndPreservesWindowBreaker() {
+        let h = Harness(bundles: [
+            "Safari": "com.apple.Safari",
+            "Passwords": "com.apple.Passwords",
+        ])
+        h.logic.hungBackoff = 3600
+        h.backend.windows = [win(1, app: "Safari")]
+        h.backend.focusedWin = win(1, app: "Safari")
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 50_000)
+        h.logic.fireWatchdogNowForTesting()
+
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.cmuxterm.app", localizedName: "cmux")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .nativeBundle,
+            bundleIdentifier: "com.apple.Passwords", detail: nil)
+        h.logic.jump(appName: "Passwords")
+        h.settle()
+        #expect(h.launcher.activationCalls.last?.appName == "Passwords")
+
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+        h.logic.jump(appName: "Safari")
+        h.settle()
+        #expect(h.telemetry.all.contains { $0.outcome == "dropped-backoff" })
+    }
+
+    @Test func nativeTimeoutDoesNotArmWindowBackoffOrRetry() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.logic.applicationDeadline = 0.01
+        h.logic.hungBackoff = 3600
+        h.launcher.activationCompletesImmediately = false
+
+        h.logic.jump(appName: "Passwords")
+        for _ in 0..<200 where !h.telemetry.all.contains(
+            where: { $0.outcome == "native-timeout" }) {
+            usleep(20_000)
+        }
+
+        #expect(h.telemetry.all.contains { $0.outcome == "native-timeout" })
+        #expect(h.telemetry.all.first {
+            $0.outcome == "native-timeout"
+        }?.path == "native-bundle")
+        #expect(h.logic.isIdleForTesting)
+        #expect(h.backend.focusedWindowIds.isEmpty)
+
+        h.backend.windows = [win(1, app: "Safari")]
+        h.backend.focusedWin = win(1, app: "Safari")
+        h.sync()
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.backend.focusedWindowIds == [1])
+        #expect(!h.telemetry.all.contains { $0.outcome == "dropped-backoff" })
+    }
+
+    @Test func nativeJumpSupersedesHangingCycle() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.backend.windows = [win(1), win(2)]
+        h.backend.focusedWin = win(1)
+        h.sync()
+        h.store.update(appName: "Safari") { $0.ring = [1, 2] }
+        h.backend.focusSpaceCompletesImmediately = false
+
+        h.logic.cycle(direction: .next)
+        h.settle(ms: 50_000)
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.cmuxterm.app", localizedName: "cmux")
+        h.logic.jump(appName: "Passwords")
+        h.settle()
+
+        #expect(h.launcher.activationCalls.last?.appName == "Passwords")
+        #expect(h.telemetry.immediate.contains {
+            $0.command == "next" && $0.outcome == "superseded"
+        })
+    }
+
+    @Test func repeatedNativeTargetQueuesInOrderWithoutWindowCap() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.logic.maxPending = 1
+        h.launcher.activationCompletesImmediately = false
+
+        for _ in 0..<3 { h.logic.jump(appName: "Passwords") }
+        h.settle(ms: 50_000)
+        #expect(h.launcher.activationCalls.count == 1)
+
+        for expected in 2...3 {
+            #expect(h.launcher.completeNextActivation())
+            h.settle(ms: 50_000)
+            #expect(h.launcher.activationCalls.count == expected)
+        }
+        #expect(h.launcher.completeNextActivation())
+        h.settle()
+
+        #expect(h.telemetry.verified.count == 3)
+        #expect(!h.telemetry.all.contains { $0.outcome == "dropped-cap" })
+
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords")
+        h.backend.windows = [win(7, app: "Passwords")]
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = true
+        h.logic.jump(appName: "Passwords")
+        h.settle()
+        #expect(h.backend.focusedWindowIds.last == 7)
+    }
+
+    @Test func differentNativeTargetsRemainLastWriteWins() {
+        let h = Harness(bundles: [
+            "Passwords": "com.apple.Passwords",
+            "Safari": "com.apple.Safari",
+        ])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.cmuxterm.app", localizedName: "cmux")
+        h.launcher.activationCompletesImmediately = false
+
+        h.logic.jump(appName: "Passwords")
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 50_000)
+
+        #expect(h.launcher.activationCalls.map(\.appName) == ["Passwords", "Safari"])
+        #expect(h.telemetry.immediate.contains {
+            $0.app == "Passwords" && $0.outcome == "superseded"
+        })
+
+        #expect(h.launcher.completeNextActivation())
+        #expect(h.launcher.completeNextActivation())
+        h.settle()
+        #expect(h.telemetry.verified.contains { $0.app == "Safari" })
+    }
+
     @Test func watchdogReleasesPumpWhenAYabaiCallHangs() {
         // A command whose yabai call never returns must not wedge the serial
         // pump forever. The watchdog force-releases it so a later command runs.

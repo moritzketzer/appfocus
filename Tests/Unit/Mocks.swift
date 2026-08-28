@@ -169,6 +169,10 @@ final class MockAppLauncher: AppLauncher, @unchecked Sendable {
     var activatedApps: [String] = []
     var activationCalls: [ApplicationActivationCall] = []
     var launchSuccess = true
+    var activationCompletesImmediately = true
+    var pendingActivationCompletions: [
+        (ApplicationActionResult) -> Void
+    ] = []
     var activationResult = ApplicationActionResult(
         success: true, path: .legacyName, bundleIdentifier: nil, detail: nil)
     var reopenResult = ApplicationActionResult(
@@ -181,7 +185,20 @@ final class MockAppLauncher: AppLauncher, @unchecked Sendable {
     ) {
         activationCalls.append(ApplicationActivationCall(
             appName: appName, bundleIdentifier: bundleIdentifier))
-        completion(activationResult)
+        if activationCompletesImmediately {
+            completion(activationResult)
+        } else {
+            pendingActivationCompletions.append(completion)
+        }
+    }
+
+    @discardableResult
+    func completeNextActivation(
+        result: ApplicationActionResult? = nil
+    ) -> Bool {
+        guard !pendingActivationCompletions.isEmpty else { return false }
+        pendingActivationCompletions.removeFirst()(result ?? activationResult)
+        return true
     }
 
     func reopen(

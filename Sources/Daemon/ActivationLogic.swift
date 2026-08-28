@@ -19,14 +19,21 @@ final class ActivationLogic {
 
     // MARK: - Command pump state (guarded by activationQueue)
 
+    private enum JobDomain {
+        case application
+        case window
+    }
+
     /// A queued command: its resolved target app (`nil` for cycle) plus the
     /// closure that runs its async chain with a fresh token and a completion.
     private struct PumpJob {
+        let domain: JobDomain
         let app: String?
         let trace: CommandTrace
         let run: (_ token: UInt64, _ done: @escaping () -> Void) -> Void
     }
     private var running = false
+    private var runningDomain: JobDomain?
     private var runningApp: String?
     private var runningTrace: CommandTrace?
     private var pending: [PumpJob] = []
@@ -52,6 +59,7 @@ final class ActivationLogic {
     /// launch/poll path is bounded at ~3s, but during a hang we prefer to
     /// release early and retry over waiting.
     var commandDeadline: TimeInterval = 3.0
+    var applicationDeadline: TimeInterval = 3.0
     var hungBackoff: TimeInterval = 1.0
     /// Backstop against pathological backlog during a slow-but-completing yabai.
     /// Generous: normal fast input drains faster than it arrives so the queue
@@ -115,10 +123,10 @@ final class ActivationLogic {
     /// command that continues navigating the same context (`next`/`prev`, or a
     /// `jump` to the same app) is never a stale-focus hazard, so it queues and
     /// compounds instead of being discarded.
-    private func submit(app: String?, trace: CommandTrace,
+    private func submit(domain: JobDomain, app: String?, trace: CommandTrace,
                         userInitiated: Bool = true,
                         _ run: @escaping (UInt64, @escaping () -> Void) -> Void) {
-        let job = PumpJob(app: app, trace: trace, run: run)
+        let job = PumpJob(domain: domain, app: app, trace: trace, run: run)
         var start: (UInt64, PumpJob)?
         var action = ""
         var recordNow: [CommandTrace] = []
@@ -129,18 +137,23 @@ final class ActivationLogic {
             // interleaves between clear and breaker-check and revives a stale
             // target against the newer press.
             if userInitiated { pendingRetry = nil }
-            // Circuit breaker: if a recent command timed out on yabai, drop new
-            // commands briefly instead of hammering the still-hung backend.
-            if DispatchTime.now() < hungUntil {
+            // The breaker protects yabai only. Native application activation
+            // remains available while the window backend is backing off.
+            if job.domain == .window, DispatchTime.now() < hungUntil {
                 action = "DROP \(app ?? "cycle") (yabai unresponsive, backing off)"
                 trace.update { $0.outcome = "dropped-backoff" }
                 recordNow.append(trace)
                 return
             }
-            if running, let newApp = app,
-               let curApp = runningApp, curApp != newApp {
+            let targetChanged = app != nil && runningApp != nil
+                && app != runningApp
+            let applicationSupersedesWindow = job.domain == .application
+                && runningDomain == .window
+            if running, targetChanged || applicationSupersedesWindow {
+                let previousApp = runningApp
                 // Genuine target change: cancel the in-flight command's async
-                // tail (bump token) and run the new jump immediately.
+                // tail (bump token) and run the new jump immediately. Native
+                // activation also supersedes any window job, including cycle.
                 currentToken &+= 1
                 if let cur = runningTrace {
                     cur.update { $0.outcome = "superseded" }
@@ -151,15 +164,22 @@ final class ActivationLogic {
                     recordNow.append(dropped.trace)
                 }
                 pending.removeAll()
-                runningApp = newApp
+                inFlightTarget = nil
+                runningDomain = job.domain
+                runningApp = app
                 runningTrace = job.trace
                 start = (currentToken, job)
-                action = "SUPERSEDE \(curApp)->\(newApp) tok=\(currentToken)"
+                action = "SUPERSEDE \(previousApp ?? "cycle")->\(app ?? "cycle") tok=\(currentToken)"
             } else if running {
-                // Cap the queue so hammering during a slow spell can't build a
-                // backlog that storms when yabai recovers; keep the newest.
-                if pending.count >= self.maxPending {
-                    let evicted = pending.removeFirst()
+                // Cap only queued window work. Repeated native activations are
+                // ordered user intent and never participate in the yabai cap.
+                let queuedWindows = pending.indices.filter {
+                    pending[$0].domain == .window
+                }
+                if job.domain == .window,
+                   queuedWindows.count >= self.maxPending,
+                   let evictionIndex = queuedWindows.first {
+                    let evicted = pending.remove(at: evictionIndex)
                     evicted.trace.update { $0.outcome = "dropped-cap" }
                     recordNow.append(evicted.trace)
                     action = "QUEUE \(app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
@@ -170,6 +190,7 @@ final class ActivationLogic {
             } else {
                 running = true
                 currentToken &+= 1
+                runningDomain = job.domain
                 runningApp = app
                 runningTrace = job.trace
                 start = (currentToken, job)
@@ -187,20 +208,62 @@ final class ActivationLogic {
         // A new command is about to act: any pending verification of a
         // previous command can no longer be attributed truthfully.
         verifier.commandStarted()
-        // Watchdog: if this command hasn't finished by the deadline, assume
-        // yabai is hung and force-release the pump. Runs off the activation
-        // queue so it can take the lock. Self-invalidates when the command
-        // finished normally (token no longer current).
-        DispatchQueue.global().asyncAfter(deadline: .now() + self.commandDeadline) { [self] in
-            self.watchdogFire(token)
-        }
         let lock = NSLock()
         var fired = false
-        job.run(token) { [self] in
-            lock.lock(); let first = !fired; fired = true; lock.unlock()
-            guard first else { return }
-            self.finish(token)
+        let claimCompletion = {
+            lock.lock(); defer { lock.unlock() }
+            guard !fired else { return false }
+            fired = true
+            return true
         }
+        let deadline = job.domain == .application
+            ? applicationDeadline : commandDeadline
+        DispatchQueue.global().asyncAfter(deadline: .now() + deadline) { [self] in
+            guard claimCompletion() else { return }
+            if job.domain == .application {
+                self.applicationDeadlineFire(token)
+            } else {
+                self.watchdogFire(token)
+            }
+        }
+        job.run(token) { [self] in
+            guard claimCompletion() else { return }
+            self.finish(token, domain: job.domain)
+        }
+    }
+
+    /// Release a native activation whose AppKit callback never arrived. This
+    /// fences late callbacks and advances queued work without touching yabai's
+    /// breaker or retry state.
+    private func applicationDeadlineFire(_ token: UInt64) {
+        var next: (UInt64, PumpJob)?
+        var fired = false
+        activationQueue.sync {
+            guard token == currentToken, running,
+                  runningDomain == .application else { return }
+            currentToken &+= 1
+            if let trace = runningTrace {
+                trace.update { $0.outcome = "native-timeout" }
+                verifier.recordImmediate(trace)
+            }
+            if pending.isEmpty {
+                running = false
+                runningDomain = nil
+                runningApp = nil
+                runningTrace = nil
+            } else {
+                let job = pending.removeFirst()
+                runningDomain = job.domain
+                runningApp = job.app
+                runningTrace = job.trace
+                next = (currentToken, job)
+            }
+            fired = true
+        }
+        if fired {
+            Log.error("pump: native activation tok=\(token) exceeded \(applicationDeadline)s")
+        }
+        if let (nextToken, job) = next { runJob(nextToken, job) }
     }
 
     /// Force-release the pump when a command overran the deadline (yabai hung).
@@ -212,7 +275,8 @@ final class ActivationLogic {
         var armed = false
         var timedOut: [CommandTrace] = []
         activationQueue.sync {
-            guard token == currentToken, running else { return }  // already finished
+            guard token == currentToken, running,
+                  runningDomain == .window else { return }
             currentToken &+= 1
             if let cur = runningTrace {
                 cur.update { $0.outcome = "timeout" }
@@ -227,15 +291,16 @@ final class ActivationLogic {
             }
             pending.removeAll()
             running = false
+            runningDomain = nil
             runningApp = nil
             runningTrace = nil
             hungUntil = DispatchTime.now() + self.hungBackoff
             fired = true
             if let f = inFlightTarget, f.token == token {
                 pendingRetry = f.target
-                inFlightTarget = nil
                 armed = true
             }
+            inFlightTarget = nil
         }
         for t in timedOut { verifier.recordImmediate(t) }
         if fired {
@@ -263,7 +328,8 @@ final class ActivationLogic {
         guard let retry else { return }  // cancelled by a newer user command
         let trace = CommandTrace(command: "jump", app: retry.appName)
         trace.update { $0.path = "retry" }
-        submit(app: retry.appName, trace: trace, userInitiated: false) { [self] token, done in
+        submit(domain: .window, app: retry.appName, trace: trace,
+               userInitiated: false) { [self] token, done in
             let windows = self.model.snapshot().windows
             guard let target = windows.first(where: { $0.id == retry.windowId }),
                   target.isStandardWindow, !target.isMinimized else {
@@ -300,14 +366,17 @@ final class ActivationLogic {
     /// Advance the pump when a command completes. Ignored when the completing
     /// command was already superseded (its token is no longer current), so a
     /// cancelled command's late callback cannot start the next one twice.
-    private func finish(_ token: UInt64) {
+    private func finish(_ token: UInt64, domain: JobDomain) {
         var next: (UInt64, PumpJob)?
         var note = ""
         var completed: CommandTrace?
         activationQueue.sync {
             guard token == currentToken else { note = "STALE tok=\(token) cur=\(currentToken)"; return }
-            // A normal completion means yabai responded — clear any backoff.
-            hungUntil = DispatchTime.now()
+            if domain == .window {
+                // Only a normal window completion proves yabai recovered.
+                hungUntil = DispatchTime.now()
+                if inFlightTarget?.token == token { inFlightTarget = nil }
+            }
             completed = runningTrace
             // Hand the completed trace to the verifier INSIDE this critical
             // section: when the pump goes idle, a keypress on another thread
@@ -325,12 +394,14 @@ final class ActivationLogic {
             }
             if pending.isEmpty {
                 running = false
+                runningDomain = nil
                 runningApp = nil
                 runningTrace = nil
                 note = "DONE tok=\(token) idle"
             } else {
                 let job = pending.removeFirst()
                 currentToken &+= 1
+                runningDomain = job.domain
                 runningApp = job.app
                 runningTrace = job.trace
                 next = (currentToken, job)
@@ -369,11 +440,15 @@ final class ActivationLogic {
 
         if !targetIsFrontmost {
             trace.update {
+                $0.path = bundleIdentifier == nil
+                    ? ApplicationActionPath.legacyName.rawValue
+                    : ApplicationActionPath.nativeBundle.rawValue
                 $0.verificationTargetKind = .application
                 $0.targetBundleIdentifier = bundleIdentifier
                 $0.decidedAt = .now()
             }
-            submit(app: appName, trace: trace) { [self] token, done in
+            submit(domain: .application, app: appName,
+                   trace: trace) { [self] token, done in
                 Log.info("jump: activating \(appName)")
                 self.launcher.activate(
                     appName: appName,
@@ -394,7 +469,7 @@ final class ActivationLogic {
             return
         }
 
-        submit(app: appName, trace: trace) { [self] token, done in
+        submit(domain: .window, app: appName, trace: trace) { [self] token, done in
             Log.info("jump: \(appName)")
             self.performJump(appName: appName, trace: trace, token: token, done: done)
         }
@@ -798,7 +873,7 @@ final class ActivationLogic {
 
     func cycle(direction: CycleDirection) {
         let trace = CommandTrace(command: direction.rawValue, app: nil)
-        submit(app: nil, trace: trace) { [self] token, done in
+        submit(domain: .window, app: nil, trace: trace) { [self] token, done in
             Log.info("cycle: \(direction)")
             self.performCycle(direction: direction, trace: trace, token: token, done: done)
         }
