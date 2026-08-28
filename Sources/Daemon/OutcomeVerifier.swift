@@ -22,6 +22,7 @@ protocol OutcomeVerifying {
 /// or re-enters the command pump.
 final class OutcomeVerifier: OutcomeVerifying {
     private let backend: WindowBackend
+    private let workspace: ApplicationWorkspace
     private let model: WindowModelStore
     private let resolveAlias: (String) -> String
     private let sinkPath: String
@@ -47,14 +48,26 @@ final class OutcomeVerifier: OutcomeVerifying {
     private var pendingEligibleAt = DispatchTime.now()
     private var timerArmed = false
     private var loggedWriteFailure = false
+    private var activationObservation: AnyObject?
+    private var lastActivation: (identity: ApplicationIdentity,
+                                 observedAt: DispatchTime)?
 
-    init(backend: WindowBackend, model: WindowModelStore,
+    init(backend: WindowBackend,
+         workspace: ApplicationWorkspace = SystemApplicationWorkspace(),
+         model: WindowModelStore,
          resolveAlias: @escaping (String) -> String,
          sinkPath: String = SocketPath.stateDir + "/telemetry.jsonl") {
         self.backend = backend
+        self.workspace = workspace
         self.model = model
         self.resolveAlias = resolveAlias
         self.sinkPath = sinkPath
+        activationObservation = workspace.observeActivations { [weak self] identity in
+            let observedAt = DispatchTime.now()
+            self?.queue.async {
+                self?.lastActivation = (identity, observedAt)
+            }
+        }
     }
 
     func recordImmediate(_ trace: CommandTrace) {
@@ -106,11 +119,59 @@ final class OutcomeVerifier: OutcomeVerifying {
             return
         }
         pending = nil
+        let target = trace.verificationTarget
+        if target.kind == .application {
+            classifyApplication(trace, target: target)
+            write(trace)
+            return
+        }
         let queryStart = DispatchTime.now()
         backend.queryAllWindows { windows in
             self.queue.async {
                 self.classify(trace, windows: windows, queryStart: queryStart)
                 self.write(trace)
+            }
+        }
+    }
+
+    // Runs on `queue`. Native application verification never touches yabai.
+    private func classifyApplication(
+        _ trace: CommandTrace,
+        target: VerificationTarget
+    ) {
+        let verifyStart = DispatchTime.now()
+        let notificationIdentity: ApplicationIdentity?
+        if let lastActivation,
+           lastActivation.observedAt.uptimeNanoseconds
+               >= target.evidenceAfter.uptimeNanoseconds {
+            notificationIdentity = lastActivation.identity
+        } else {
+            notificationIdentity = nil
+        }
+        let actual = workspace.frontmostApplication ?? notificationIdentity
+        let outcome: String
+        if let expectedBundle = target.bundleIdentifier {
+            outcome = actual?.bundleIdentifier == expectedBundle
+                ? "ok-app" : "wrong-window"
+        } else if let expectedName = target.app {
+            outcome = actual?.localizedName.map(resolveAlias) == expectedName
+                ? "ok-app" : "wrong-window"
+        } else {
+            outcome = "unverified-queryfail"
+        }
+
+        trace.update { t in
+            t.verifyMs = Int((DispatchTime.now().uptimeNanoseconds
+                &- verifyStart.uptimeNanoseconds) / 1_000_000)
+            t.outcome = outcome
+            if outcome == "wrong-window" {
+                let identity = actual.map {
+                    "\($0.bundleIdentifier ?? "unknown")/\($0.localizedName ?? "unknown")"
+                } ?? "none"
+                t.detail = appendDetail(t.detail, "actual=\(identity)")
+            } else if outcome == "unverified-queryfail" {
+                t.detail = appendDetail(t.detail,
+                    "no application target identity")
             }
         }
     }

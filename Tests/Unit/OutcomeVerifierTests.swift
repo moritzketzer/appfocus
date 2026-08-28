@@ -12,15 +12,18 @@ private func win(_ id: Int, app: String = "Safari", space: Int = 1,
 
 private struct VerifierHarness {
     let backend: MockWindowBackend
+    let workspace: MockApplicationWorkspace
     let model: WindowModelStore
     let verifier: OutcomeVerifier
     let sink: String
 
     init() {
         backend = MockWindowBackend()
+        workspace = MockApplicationWorkspace()
         model = WindowModelStore()
         sink = NSTemporaryDirectory() + "appfocus-telemetry-\(UUID().uuidString).jsonl"
-        verifier = OutcomeVerifier(backend: backend, model: model,
+        verifier = OutcomeVerifier(backend: backend, workspace: workspace,
+                                   model: model,
                                    resolveAlias: { $0 }, sinkPath: sink)
         verifier.delay = 0.05
     }
@@ -53,10 +56,114 @@ private struct VerifierHarness {
         t.outcome = "unknown"
         return t
     }
+
+    func applicationTrace(app: String, bundle: String?) -> CommandTrace {
+        let t = trace(app: app)
+        t.path = bundle == nil ? "legacy-name" : "native-bundle"
+        t.verificationTargetKind = .application
+        t.targetBundleIdentifier = bundle
+        return t
+    }
 }
 
 @Suite("OutcomeVerifier")
 struct OutcomeVerifierTests {
+
+    @Test func nativeApplicationVerificationNeverQueriesBackend() {
+        let h = VerifierHarness()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords")
+
+        h.verifier.verify(h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords"))
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func activationNotificationCanVerifyNativeApplication() {
+        let h = VerifierHarness()
+        let trace = h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords")
+        h.verifier.verify(trace)
+        h.workspace.emitActivation(ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords"))
+        h.workspace.frontmostApplication = nil
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func applicationVerificationRejectsWrongBundle() {
+        let h = VerifierHarness()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+
+        h.verifier.verify(h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords"))
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "wrong-window")
+        #expect((recs.first?["detail"] as? String)?.contains("com.apple.Safari") == true)
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func legacyApplicationVerificationUsesLocalizedName() {
+        let h = VerifierHarness()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Generic App")
+
+        h.verifier.verify(h.applicationTrace(app: "Generic App", bundle: nil))
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "ok-app")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func preFailedApplicationTraceRecordsWithoutQuery() {
+        let h = VerifierHarness()
+        let trace = h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords")
+        trace.outcome = "failed"
+
+        h.verifier.verify(trace)
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "failed")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func applicationBurstCoalescesWithoutBackendQuery() {
+        let h = VerifierHarness()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords")
+        h.verifier.verify(h.applicationTrace(
+            app: "Safari", bundle: "com.apple.Safari"))
+        h.verifier.verify(h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords"))
+
+        let recs = h.waitForRecords(2)
+        let outcomes = recs.compactMap { $0["outcome"] as? String }.sorted()
+        #expect(outcomes == ["ok-app", "unverified-burst"])
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func staleActivationNotificationCannotVerifyLaterCommand() {
+        let h = VerifierHarness()
+        h.workspace.emitActivation(ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords"))
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+
+        h.verifier.verify(h.applicationTrace(
+            app: "Passwords", bundle: "com.apple.Passwords"))
+
+        let recs = h.waitForRecords(1)
+        #expect(recs.first?["outcome"] as? String == "wrong-window")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
 
     @Test func classifiesOkWhenTargetFocusedAndVisible() {
         let h = VerifierHarness()

@@ -1,6 +1,19 @@
 // Sources/Daemon/CommandTrace.swift
 import Foundation
 
+enum VerificationTargetKind: String, Equatable {
+    case window
+    case application
+}
+
+struct VerificationTarget {
+    let kind: VerificationTargetKind
+    let app: String?
+    let bundleIdentifier: String?
+    let windowIdentifier: Int?
+    let evidenceAfter: DispatchTime
+}
+
 /// Per-command telemetry record: what was intended, which path the daemon
 /// took, what happened on screen, and how long each phase took. Created at
 /// command entry, enriched along the existing chain (assignments only), and
@@ -21,6 +34,8 @@ final class CommandTrace {
     let command: String        // "jump" | "next" | "prev"
     let app: String?           // resolved target app (nil for cycle at entry)
     var path: String = "unknown"  // hot|confirm|launch|reopen|fallback|retry|noop
+    var verificationTargetKind: VerificationTargetKind = .window
+    var targetBundleIdentifier: String?
     var targetWindowId: Int?
     var targetSpace: Int?
     var crossedSpace = false   // model's view: target on another Space than
@@ -56,6 +71,17 @@ final class CommandTrace {
         return outcome
     }
 
+    /// Atomic view of the identity and timing evidence the verifier needs.
+    var verificationTarget: VerificationTarget {
+        lock.lock(); defer { lock.unlock() }
+        return VerificationTarget(
+            kind: verificationTargetKind,
+            app: app,
+            bundleIdentifier: targetBundleIdentifier,
+            windowIdentifier: targetWindowId,
+            evidenceAfter: actionedAt ?? receivedAt)
+    }
+
     private static func ms(_ from: DispatchTime, _ to: DispatchTime) -> Int {
         Int((to.uptimeNanoseconds &- from.uptimeNanoseconds) / 1_000_000)
     }
@@ -76,8 +102,12 @@ final class CommandTrace {
             "path": path,
             "outcome": outcome,
             "crossed_space": crossedSpace,
+            "target_kind": verificationTargetKind.rawValue,
         ]
         if let app = app { obj["app"] = app }
+        if let bundle = targetBundleIdentifier {
+            obj["target_bundle_id"] = bundle
+        }
         if let id = targetWindowId { obj["target_id"] = id }
         if let sp = targetSpace { obj["target_space"] = sp }
         if let decided = decidedAt {

@@ -9,6 +9,16 @@ private func parse(_ line: String) -> [String: Any] {
 @Suite("CommandTrace")
 struct CommandTraceTests {
 
+    @Test func applicationTargetEncodesIdentity() {
+        let trace = CommandTrace(command: "jump", app: "Passwords")
+        trace.verificationTargetKind = .application
+        trace.targetBundleIdentifier = "com.apple.Passwords"
+
+        let obj = parse(trace.jsonLine())
+        #expect(obj["target_kind"] as? String == "application")
+        #expect(obj["target_bundle_id"] as? String == "com.apple.Passwords")
+    }
+
     @Test func encodesCoreFieldsAndDurations() {
         let t0 = DispatchTime.now()
         let trace = CommandTrace(command: "jump", app: "Safari", receivedAt: t0)
