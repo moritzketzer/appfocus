@@ -41,6 +41,7 @@ private struct Harness: @unchecked Sendable {
         let config = AppFocusConfig(
             backend: "yabai", yabaiPath: "/usr/bin/true",
             aliases: aliases, reopenStrategies: strategies,
+            bundleIdentifiers: [:],
             pollIntervalMs: 2000)
         backend = MockWindowBackend()
         launcher = MockAppLauncher()

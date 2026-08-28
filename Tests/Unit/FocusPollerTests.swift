@@ -21,7 +21,8 @@ struct FocusPollerTests {
         let config = AppFocusConfig(
             backend: "yabai", yabaiPath: "/usr/bin/true",
             aliases: ["Code": "Visual Studio Code"],
-            reopenStrategies: [:], pollIntervalMs: 2000)
+            reopenStrategies: [:], bundleIdentifiers: [:],
+            pollIntervalMs: 2000)
         let poller = FocusPoller(backend: backend, store: store,
                                  config: config, model: model)
         return (backend, store, model, poller)

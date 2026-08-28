@@ -3,12 +3,14 @@ import Foundation
 import Testing
 
 private func testConfig(aliases: [String: String] = [:],
-                        strategies: [String: ReopenStrategy] = [:]) -> AppFocusConfig {
+                        strategies: [String: ReopenStrategy] = [:],
+                        bundles: [String: String] = [:]) -> AppFocusConfig {
     AppFocusConfig(
         backend: "yabai",
         yabaiPath: "/usr/local/bin/yabai",
         aliases: aliases,
         reopenStrategies: strategies,
+        bundleIdentifiers: bundles,
         pollIntervalMs: 1000,
         kanataEnabled: true,
         kanataPort: 7070)
@@ -37,6 +39,24 @@ struct ConfigTests {
     @Test func resolveChainDoesNotRecurse() {
         let config = testConfig(aliases: ["A": "B", "B": "C"])
         #expect(config.resolveAlias("A") == "B")
+    }
+
+    // MARK: - Bundle identity
+
+    @Test func bundleIdentifiersDefaultToEmpty() throws {
+        let json = """
+        {"backend":"yabai","yabai_path":"/usr/bin/yabai"}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(AppFocusConfig.self, from: json)
+        #expect(config.bundleIdentifiers.isEmpty)
+    }
+
+    @Test func bundleIdentifierUsesCanonicalAliasTarget() {
+        let config = testConfig(
+            aliases: ["Word": "Microsoft Word"],
+            bundles: ["Microsoft Word": "com.microsoft.Word"])
+        #expect(config.bundleIdentifier(for: "Word") == "com.microsoft.Word")
+        #expect(config.bundleIdentifier(for: "Microsoft Word") == "com.microsoft.Word")
     }
 
     // MARK: - Poll interval default
@@ -89,6 +109,7 @@ struct ConfigTests {
 
         #expect(decoded.backend == config.backend)
         #expect(decoded.aliases == config.aliases)
+        #expect(decoded.bundleIdentifiers == config.bundleIdentifiers)
         #expect(decoded.pollIntervalMs == config.pollIntervalMs)
     }
 }

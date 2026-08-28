@@ -1,6 +1,43 @@
 // Tests/Unit/Mocks.swift
 import Foundation
 
+/// Mock native workspace that records URL activation and emits deterministic
+/// frontmost-application notifications without touching AppKit.
+final class MockApplicationWorkspace: ApplicationWorkspace, @unchecked Sendable {
+    var frontmostApplication: ApplicationIdentity?
+    var urls: [String: URL] = [:]
+    var opened: [(url: URL, activates: Bool)] = []
+    var openResult: Result<ApplicationIdentity, Error> = .success(
+        ApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+                            localizedName: "Safari"))
+    private var handlers: [(ApplicationIdentity) -> Void] = []
+
+    func applicationURL(bundleIdentifier: String) -> URL? {
+        urls[bundleIdentifier]
+    }
+
+    func openApplication(
+        at url: URL,
+        activates: Bool,
+        completion: @escaping (Result<ApplicationIdentity, Error>) -> Void
+    ) {
+        opened.append((url, activates))
+        completion(openResult)
+    }
+
+    func observeActivations(
+        _ handler: @escaping (ApplicationIdentity) -> Void
+    ) -> AnyObject {
+        handlers.append(handler)
+        return NSObject()
+    }
+
+    func emitActivation(_ identity: ApplicationIdentity) {
+        frontmostApplication = identity
+        handlers.forEach { $0(identity) }
+    }
+}
+
 /// Mock window backend that returns preset data and records calls.
 final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var windows: [WindowInfo] = []

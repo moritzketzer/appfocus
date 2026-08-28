@@ -6,6 +6,7 @@ struct AppFocusConfig: Codable {
     var yabaiPath: String
     var aliases: [String: String]
     var reopenStrategies: [String: ReopenStrategy]
+    var bundleIdentifiers: [String: String]
     var pollIntervalMs: Int
     var kanataEnabled: Bool = true
     var kanataPort: Int = 7070
@@ -15,6 +16,7 @@ struct AppFocusConfig: Codable {
         case yabaiPath = "yabai_path"
         case aliases
         case reopenStrategies = "reopen_strategies"
+        case bundleIdentifiers = "bundle_identifiers"
         case pollIntervalMs = "poll_interval_ms"
         case kanataEnabled = "kanata_enabled"
         case kanataPort = "kanata_port"
@@ -25,6 +27,7 @@ struct AppFocusConfig: Codable {
         yabaiPath: "/etc/profiles/per-user/\(NSUserName())/bin/yabai",
         aliases: [:],
         reopenStrategies: ["*": .reopen],
+        bundleIdentifiers: [:],
         pollIntervalMs: 2000,
         kanataEnabled: true,
         kanataPort: 7070
@@ -55,6 +58,11 @@ struct AppFocusConfig: Codable {
         return aliases[name] ?? name
     }
 
+    /// Resolve aliases before looking up the stable macOS application identity.
+    func bundleIdentifier(for appName: String) -> String? {
+        return bundleIdentifiers[resolveAlias(appName)]
+    }
+
     /// Get reopen strategy for an app. Falls back to "*" default, then .reopen.
     func reopenStrategy(for appName: String) -> ReopenStrategy {
         return reopenStrategies[appName]
@@ -70,6 +78,7 @@ extension AppFocusConfig {
         yabaiPath = try c.decode(String.self, forKey: .yabaiPath)
         aliases = try c.decodeIfPresent([String: String].self, forKey: .aliases) ?? [:]
         reopenStrategies = try c.decodeIfPresent([String: ReopenStrategy].self, forKey: .reopenStrategies) ?? ["*": .reopen]
+        bundleIdentifiers = try c.decodeIfPresent([String: String].self, forKey: .bundleIdentifiers) ?? [:]
         pollIntervalMs = try c.decodeIfPresent(Int.self, forKey: .pollIntervalMs) ?? 2000
         kanataEnabled = try c.decodeIfPresent(Bool.self, forKey: .kanataEnabled) ?? true
         kanataPort = try c.decodeIfPresent(Int.self, forKey: .kanataPort) ?? 7070
