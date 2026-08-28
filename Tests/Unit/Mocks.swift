@@ -158,11 +158,40 @@ final class MockProcessChecker: ProcessChecker, @unchecked Sendable {
 }
 
 /// Mock app launcher that records calls without side effects.
+struct ApplicationActivationCall: Equatable {
+    let appName: String
+    let bundleIdentifier: String?
+}
+
 final class MockAppLauncher: AppLauncher, @unchecked Sendable {
     var launchedApps: [String] = []
     var reopenedApps: [(String, ReopenStrategy)] = []
     var activatedApps: [String] = []
+    var activationCalls: [ApplicationActivationCall] = []
     var launchSuccess = true
+    var activationResult = ApplicationActionResult(
+        success: true, path: .legacyName, bundleIdentifier: nil, detail: nil)
+    var reopenResult = ApplicationActionResult(
+        success: true, path: .reopen, bundleIdentifier: nil, detail: nil)
+
+    func activate(
+        appName: String,
+        bundleIdentifier: String?,
+        completion: @escaping (ApplicationActionResult) -> Void
+    ) {
+        activationCalls.append(ApplicationActivationCall(
+            appName: appName, bundleIdentifier: bundleIdentifier))
+        completion(activationResult)
+    }
+
+    func reopen(
+        appName: String,
+        strategy: ReopenStrategy,
+        completion: @escaping (ApplicationActionResult) -> Void
+    ) {
+        reopenedApps.append((appName, strategy))
+        completion(reopenResult)
+    }
 
     func launch(appName: String, completion: @escaping (Bool) -> Void) {
         launchedApps.append(appName)
