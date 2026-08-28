@@ -930,6 +930,53 @@ struct ActivationLogicTests {
         #expect(h.logic.isIdleForTesting)
     }
 
+    @Test func newerNativeIntentWinsDuringRetryConsumptionHandoff() {
+        let h = Harness(bundles: [
+            "Passwords": "com.apple.Passwords",
+        ])
+        h.logic.hungBackoff = 0.0
+        h.logic.applicationDeadline = 3600
+        h.backend.windows = [win(1)]
+        h.backend.focusedWin = win(99, app: "Other")
+        h.sync()
+        h.backend.focusWindowCompletesImmediately = false
+        h.launcher.activationCompletesImmediately = false
+
+        h.logic.jump(appName: "Safari")
+        h.settle(ms: 100_000)
+
+        let retryConsumed = DispatchSemaphore(value: 0)
+        let resumeRetry = DispatchSemaphore(value: 0)
+        h.logic.fireWatchdogNowForTesting(onRetryConsumed: {
+            retryConsumed.signal()
+            _ = resumeRetry.wait(timeout: .now() + 10)
+        })
+        #expect(retryConsumed.wait(timeout: .now() + 10) == .success)
+
+        let resumeSent = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            usleep(500_000)
+            resumeRetry.signal()
+            resumeSent.signal()
+        }
+        h.logic.jump(appName: "Passwords")
+        #expect(resumeSent.wait(timeout: .now() + 10) == .success)
+
+        for _ in 0..<200 where !h.telemetry.immediate.contains(where: {
+            $0.outcome == "superseded"
+        }) {
+            usleep(10_000)
+        }
+
+        while h.backend.completeNextFocusWindow() { h.settle(ms: 10_000) }
+        while h.launcher.completeNextActivation() { h.settle(ms: 10_000) }
+
+        #expect(!h.telemetry.immediate.contains {
+            $0.app == "Passwords" && $0.outcome == "superseded"
+        })
+        #expect(h.logic.isIdleForTesting)
+    }
+
     @Test func noRetryWhenDroppedBeforeTargetResolved() {
         // Stuck in the confirm query — no focus target was resolved yet, so
         // nothing must replay (launch/reopen paths never auto-retry).

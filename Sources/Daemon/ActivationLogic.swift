@@ -286,7 +286,10 @@ final class ActivationLogic {
     /// bail, drops queued window work, promotes queued native work, and backs
     /// off so later window presses don't immediately re-hammer a still-hung
     /// yabai.
-    private func watchdogFire(_ token: UInt64) {
+    private func watchdogFire(
+        _ token: UInt64,
+        onRetryConsumedForTesting: (() -> Void)? = nil
+    ) {
         var next: (UInt64, PumpJob)?
         var fired = false
         var armed = false
@@ -342,7 +345,8 @@ final class ActivationLogic {
             // Fire just past the backoff window so the resubmission is not
             // dropped by the circuit breaker.
             DispatchQueue.global().asyncAfter(deadline: .now() + hungBackoff + 0.05) { [weak self] in
-                self?.submitPendingRetry()
+                self?.submitPendingRetry(
+                    onConsumedForTesting: onRetryConsumedForTesting)
             }
         }
     }
@@ -351,13 +355,20 @@ final class ActivationLogic {
     /// against the current model and replay ONLY the focus action. One shot —
     /// the pending slot is cleared before submission, and the replayed focus
     /// runs with armRetry=false so its own watchdog drop cannot re-arm.
-    private func submitPendingRetry() {
+    private func submitPendingRetry(
+        onConsumedForTesting: (() -> Void)? = nil
+    ) {
+        // Make consumption and submission one transition: a newer user press
+        // either clears the retry first or supersedes it after it has started.
+        jobStartLock.lock()
+        defer { jobStartLock.unlock() }
         var retry: RetryTarget?
         activationQueue.sync {
             retry = pendingRetry
             pendingRetry = nil
         }
         guard let retry else { return }  // cancelled by a newer user command
+        onConsumedForTesting?()
         let trace = CommandTrace(command: "jump", app: retry.appName)
         trace.update { $0.path = "retry" }
         submit(domain: .window, app: retry.appName, trace: trace,
@@ -384,8 +395,12 @@ final class ActivationLogic {
     /// Test hook: synchronously fire the watchdog on the in-flight command,
     /// exercising the force-release path deterministically without waiting on
     /// the real GCD timer (which races under parallel test execution).
-    func fireWatchdogNowForTesting() {
-        watchdogFire(activationQueue.sync { currentToken })
+    func fireWatchdogNowForTesting(
+        onRetryConsumed: (() -> Void)? = nil
+    ) {
+        watchdogFire(
+            activationQueue.sync { currentToken },
+            onRetryConsumedForTesting: onRetryConsumed)
     }
 
     /// Test hook: the pump holds no in-flight or queued command. The core
