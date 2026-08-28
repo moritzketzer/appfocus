@@ -251,6 +251,13 @@ rules. Window targets keep the current yabai snapshot classification and model
 refresh. Application targets use activation notifications plus
 `NSWorkspace.frontmostApplication`; they make zero `WindowBackend` calls.
 
+`commandStarted()` synchronously advances a generation before the newer action
+runs. Application polls and asynchronous window queries check that generation
+again before committing. If it changed, the older trace is recorded exactly
+once as `unverified-burst`, even when its read was already in flight and sees
+the newer command's foreground state. The fence does not block the command
+pump on verifier work.
+
 Application verification records `ok-app` when the expected bundle identifier
 is frontmost. The legacy path compares the canonical localized name after alias
 resolution. An AppKit or name-launcher error records `failed` immediately.
@@ -341,19 +348,22 @@ timestamp. `OutcomeVerifier.classifyApplication` accepts fresh activation
 notifications or the current frontmost application without calling
 `WindowBackend`. It condition-polls AppKit every 50 ms for up to 10 seconds
 because `NSWorkspace.openApplication` can complete before a cold application
-becomes frontmost. `ActivationLogic` uses private `application` and `window`
-job domains. Its `applicationDeadline` records `native-timeout`, while the
-window domain retains the yabai watchdog, breaker, queue cap, and one-shot
-retry.
+becomes frontmost. A lock-protected command generation advances synchronously
+before every action; application polls and window-query callbacks recheck it
+before writing, so newer focus cannot verify an older trace. `ActivationLogic`
+uses private `application` and `window` job domains. Its `applicationDeadline`
+records `native-timeout`, while the window domain retains the yabai watchdog,
+breaker, queue cap, and one-shot retry.
 
 The deterministic test fixtures are `MockApplicationWorkspace`,
 `MockAppLauncher`, `MockWindowBackend`, and `MockOutcomeVerifier`.
 `MockApplicationWorkspace` controls bundle URL resolution, open results,
 frontmost identity, and activation notifications. `MockAppLauncher` controls
 result-bearing activation and deferred callbacks for timeout, ordering, and
-supersession tests. On 2026-08-28, `make test` passed 184 tests in 14 suites,
-including a regression where Passwords becomes frontmost after the initial
-verification delay.
+supersession tests. On 2026-08-28, `make test` passed 186 tests in 14 suites,
+including regressions where Passwords becomes frontmost after the initial
+verification delay and where a newer action lands while an older application
+poll or window query is already in flight.
 
 ## Failure Behavior
 
@@ -371,8 +381,8 @@ verification delay.
 - Reopen command failure: record `failed` from the `osascript` exit status.
 - Yabai hang during same-app navigation: retain the existing watchdog,
   backoff, queue cap, and one-shot focus retry.
-- New command during pending verification: retain `unverified-burst` and
-  supersession semantics.
+- New command during pending or in-flight verification: advance the generation
+  before acting; record the older trace exactly once as `unverified-burst`.
 
 The only ongoing maintenance cost is the bundle identifier map. The registry
 coverage check makes that cost visible whenever a new Kanata app target is
@@ -401,6 +411,9 @@ The Swift suite must prove:
   yabai.
 - Application verification does not record `wrong-window` while a cold native
   activation is still within its bounded foreground wait.
+- An in-flight application poll cannot attribute a newer same-target focus
+  transition to the older trace; the older trace becomes `unverified-burst`
+  exactly once.
 - Burst coalescing and activation notifications produce deterministic
   `ok-app`, `wrong-window`, `failed`, `native-timeout`, and
   `unverified-burst` records.

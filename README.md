@@ -228,7 +228,7 @@ If the target application is already frontmost, appfocusd keeps window navigatio
 
 Per-app state (`lastFocusedId`, `prevFocusedId`, and the window ring order) is persisted as JSON files in `~/.local/state/appfocus/`. A background poll (configurable interval, default 2 s) keeps MRU data fresh when focus changes outside appfocus.
 
-The outcome verifier matches application jobs against activation notifications and `NSWorkspace.frontmostApplication`. A cold native launch may finish opening before it becomes frontmost, so the verifier waits up to 10 seconds for AppKit evidence without querying yabai. Window jobs retain the delayed yabai snapshot that verifies the focused window and refreshes the model. Telemetry names the native paths `native-bundle`, `native-axless`, and `legacy-name`.
+The outcome verifier matches application jobs against activation notifications and `NSWorkspace.frontmostApplication`. A cold native launch may finish opening before it becomes frontmost, so the verifier waits up to 10 seconds for AppKit evidence without querying yabai. Each command start advances a generation fence before acting, so an in-flight verification cannot attribute the newer focus transition to an older command. Window jobs retain the delayed yabai snapshot that verifies the focused window and refreshes the model. Telemetry names the native paths `native-bundle`, `native-axless`, and `legacy-name`.
 
 The command protocol is newline-delimited text over the Unix socket (`jump <app>`, `next`, `prev`, `status`). kanata uses a JSON `MessagePush` envelope over TCP. appfocusd unwraps it and routes to the same handler. `ApplicationWorkspace` isolates AppKit operations, while `WindowBackend` isolates yabai calls.
 
@@ -236,7 +236,7 @@ The command protocol is newline-delimited text over the Unix socket (`jump <app>
 
 ## Tests
 
-184 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
+186 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
 
 ```bash
 make test

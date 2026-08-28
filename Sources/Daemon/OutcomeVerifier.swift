@@ -27,6 +27,8 @@ final class OutcomeVerifier: OutcomeVerifying {
     private let resolveAlias: (String) -> String
     private let sinkPath: String
     private let queue = DispatchQueue(label: "appfocus.verifier")
+    private let generationLock = NSLock()
+    private var commandGeneration: UInt64 = 0
 
     /// Delay between command completion and the verification read: long
     /// enough for the WindowServer to settle the transition, short enough
@@ -45,6 +47,10 @@ final class OutcomeVerifier: OutcomeVerifying {
     /// (burst coalescing): the replaced trace is finalized as
     /// `unverified-burst` so rapid switching costs at most one query.
     private var pending: CommandTrace?
+    /// Generation captured when `pending` was submitted. `commandStarted`
+    /// advances the generation synchronously, fencing an already-running
+    /// verification before the newer action can change foreground state.
+    private var pendingGeneration: UInt64 = 0
     /// Earliest time the CURRENT pending trace may be verified: its own
     /// completion + delay. A replacement pushes this forward, and `fire`
     /// re-arms for the remainder — otherwise the newest press of a burst
@@ -81,8 +87,10 @@ final class OutcomeVerifier: OutcomeVerifying {
     }
 
     func commandStarted() {
+        let generation = advanceGeneration()
         queue.async {
-            guard let replaced = self.pending else { return }
+            guard let replaced = self.pending,
+                  self.pendingGeneration < generation else { return }
             self.pending = nil
             replaced.update { $0.outcome = "unverified-burst" }
             self.write(replaced)
@@ -91,10 +99,16 @@ final class OutcomeVerifier: OutcomeVerifying {
     }
 
     func verify(_ trace: CommandTrace) {
+        let generation = currentGeneration()
         queue.async {
             // Pre-classified completions (e.g. the focus action itself
             // reported failure) are recorded as-is without a query.
             if trace.currentOutcome == "failed" {
+                self.write(trace)
+                return
+            }
+            guard self.generationIsCurrent(generation) else {
+                trace.update { $0.outcome = "unverified-burst" }
                 self.write(trace)
                 return
             }
@@ -103,6 +117,7 @@ final class OutcomeVerifier: OutcomeVerifying {
                 self.write(replaced)
             }
             self.pending = trace
+            self.pendingGeneration = generation
             self.pendingEligibleAt = .now() + self.delay
             guard !self.timerArmed else { return }
             self.timerArmed = true
@@ -125,8 +140,18 @@ final class OutcomeVerifier: OutcomeVerifying {
             return
         }
         let target = trace.verificationTarget
+        let generation = pendingGeneration
+        guard generationIsCurrent(generation) else {
+            finalizeSuperseded(trace)
+            return
+        }
         if target.kind == .application {
-            if classifyApplication(trace, target: target) {
+            let classified = classifyApplication(trace, target: target)
+            guard generationIsCurrent(generation) else {
+                finalizeSuperseded(trace)
+                return
+            }
+            if classified {
                 pending = nil
                 write(trace)
             } else {
@@ -141,10 +166,39 @@ final class OutcomeVerifier: OutcomeVerifying {
         let queryStart = DispatchTime.now()
         backend.queryAllWindows { windows in
             self.queue.async {
-                self.classify(trace, windows: windows, queryStart: queryStart)
+                if self.generationIsCurrent(generation) {
+                    self.classify(trace, windows: windows,
+                                  queryStart: queryStart)
+                } else {
+                    trace.update { $0.outcome = "unverified-burst" }
+                }
                 self.write(trace)
             }
         }
+    }
+
+    private func advanceGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        commandGeneration &+= 1
+        return commandGeneration
+    }
+
+    private func currentGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return commandGeneration
+    }
+
+    private func generationIsCurrent(_ generation: UInt64) -> Bool {
+        currentGeneration() == generation
+    }
+
+    // Runs on `queue` while `pending` still refers to `trace`.
+    private func finalizeSuperseded(_ trace: CommandTrace) {
+        pending = nil
+        trace.update { $0.outcome = "unverified-burst" }
+        write(trace)
     }
 
     // Runs on `queue`. Native application verification never touches yabai.

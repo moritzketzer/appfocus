@@ -98,7 +98,10 @@ after completion and classify
 `ok` / `ok-app` / `invisible` /
 `wrong-window` / `failed` / `noop`, plus `superseded`/`dropped-*`/`timeout`
 recorded at their sites and `unverified-burst` for coalesced-away presses.
-The verification dump also feeds the WindowModel (fenced). Activation paths
+Command start synchronously advances a generation fence; an application poll
+or window query checks that generation again before committing, so a newer
+focus transition cannot verify an older trace. The verification dump also
+feeds the WindowModel (fenced). Activation paths
 include `native-bundle`, `legacy-name`, `native-axless`, and `reopen`.
 
 - `appfocus stats [--since 2h]` — success rate, outcome counts, p50/p95
@@ -133,6 +136,6 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 183 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 186 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a specific test: not supported — `make test` runs all tests.

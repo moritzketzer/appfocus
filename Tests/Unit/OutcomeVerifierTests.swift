@@ -10,6 +10,60 @@ private func win(_ id: Int, app: String = "Safari", space: Int = 1,
                hasFocus: hasFocus, isVisible: visible)
 }
 
+private final class BlockingApplicationWorkspace:
+    ApplicationWorkspace, @unchecked Sendable {
+    private let lock = NSLock()
+    private var identity: ApplicationIdentity?
+    let frontmostReadStarted = DispatchSemaphore(value: 0)
+    let releaseFrontmostRead = DispatchSemaphore(value: 0)
+
+    init(frontmostApplication: ApplicationIdentity?) {
+        identity = frontmostApplication
+    }
+
+    var frontmostApplication: ApplicationIdentity? {
+        frontmostReadStarted.signal()
+        releaseFrontmostRead.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        return identity
+    }
+
+    func setFrontmostApplication(_ identity: ApplicationIdentity?) {
+        lock.lock()
+        self.identity = identity
+        lock.unlock()
+    }
+
+    func applicationURL(bundleIdentifier: String) -> URL? { nil }
+
+    func openApplication(
+        at url: URL,
+        activates: Bool,
+        completion: @escaping (Result<ApplicationIdentity, Error>) -> Void
+    ) {}
+
+    func observeActivations(
+        _ handler: @escaping (ApplicationIdentity) -> Void
+    ) -> AnyObject {
+        NSObject()
+    }
+}
+
+private final class CommandStartProbe: @unchecked Sendable {
+    private let verifier: OutcomeVerifying
+    let returned = DispatchSemaphore(value: 0)
+
+    init(verifier: OutcomeVerifying) {
+        self.verifier = verifier
+    }
+
+    func run() {
+        verifier.commandStarted()
+        returned.signal()
+    }
+}
+
 private struct VerifierHarness {
     let backend: MockWindowBackend
     let workspace: MockApplicationWorkspace
@@ -262,6 +316,90 @@ struct OutcomeVerifierTests {
         // The armed timer must find nothing to verify: no query ever runs.
         usleep(200_000)
         #expect(h.backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func commandStartFencesAnInFlightApplicationPoll() {
+        let backend = MockWindowBackend()
+        let workspace = BlockingApplicationWorkspace(frontmostApplication:
+            ApplicationIdentity(bundleIdentifier: "com.cmuxterm.app",
+                                localizedName: "cmux"))
+        let sink = NSTemporaryDirectory()
+            + "appfocus-telemetry-\(UUID().uuidString).jsonl"
+        let verifier = OutcomeVerifier(
+            backend: backend,
+            workspace: workspace,
+            model: WindowModelStore(),
+            resolveAlias: { $0 },
+            sinkPath: sink)
+        verifier.delay = 0.01
+        verifier.applicationVerificationTimeout = 1.0
+        verifier.applicationPollInterval = 0.01
+        let trace = CommandTrace(command: "jump", app: "Passwords")
+        trace.path = "native-bundle"
+        trace.verificationTargetKind = .application
+        trace.targetBundleIdentifier = "com.apple.Passwords"
+        trace.decidedAt = .now()
+        trace.actionedAt = .now()
+        trace.outcome = "unknown"
+
+        verifier.verify(trace)
+        #expect(workspace.frontmostReadStarted.wait(
+            timeout: .now() + 10) == .success)
+
+        let commandStart = CommandStartProbe(verifier: verifier)
+        let commandStartThread = Thread { commandStart.run() }
+        commandStartThread.start()
+        #expect(commandStart.returned.wait(
+            timeout: .now() + 10) == .success)
+
+        // The newer action lands after commandStarted returns but before the
+        // older poll reads. A generation fence must keep that newer focus
+        // transition from verifying the older trace.
+        workspace.setFrontmostApplication(ApplicationIdentity(
+            bundleIdentifier: "com.apple.Passwords",
+            localizedName: "Passwords"))
+        workspace.releaseFrontmostRead.signal()
+
+        var records: [[String: Any]] = []
+        for _ in 0..<500 where records.isEmpty {
+            if let content = try? String(contentsOfFile: sink,
+                                         encoding: .utf8) {
+                records = content.split(separator: "\n").compactMap {
+                    (try? JSONSerialization.jsonObject(
+                        with: Data($0.utf8))) as? [String: Any]
+                }
+            }
+            if records.isEmpty { usleep(20_000) }
+        }
+
+        #expect(records.count == 1)
+        #expect(records.first?["outcome"] as? String == "unverified-burst")
+        #expect(records.contains {
+            $0["outcome"] as? String == "ok-app"
+        } == false)
+        #expect(backend.queryAllWindowsCallCount == 0)
+    }
+
+    @Test func commandStartFencesAnInFlightWindowQuery() {
+        let h = VerifierHarness()
+        h.backend.queryAllWindowsCompletesImmediately = false
+        h.verifier.verify(h.trace(target: 1))
+
+        for _ in 0..<500 where h.backend.queryAllWindowsCallCount == 0 {
+            usleep(20_000)
+        }
+        #expect(h.backend.queryAllWindowsCallCount == 1)
+
+        h.verifier.commandStarted()
+        h.backend.windows = [win(1, hasFocus: true)]
+        #expect(h.backend.completeNextQueryAllWindows())
+
+        let records = h.waitForRecords(1)
+        #expect(records.count == 1)
+        #expect(records.first?["outcome"] as? String == "unverified-burst")
+        #expect(records.contains {
+            $0["outcome"] as? String == "ok"
+        } == false)
     }
 
     @Test func preFailedTraceRecordsWithoutQuery() {
