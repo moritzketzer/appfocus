@@ -8,6 +8,7 @@ final class ActivationLogic {
     private let launcher: AppLauncher
     private let store: StateStore
     private let processChecker: ProcessChecker
+    private let workspace: ApplicationWorkspace
     private let model: WindowModelStore
     private let verifier: OutcomeVerifying
 
@@ -83,13 +84,16 @@ final class ActivationLogic {
 
     init(config: AppFocusConfig, backend: WindowBackend,
          launcher: AppLauncher, store: StateStore,
-         processChecker: ProcessChecker, model: WindowModelStore,
+         processChecker: ProcessChecker,
+         workspace: ApplicationWorkspace = SystemApplicationWorkspace(),
+         model: WindowModelStore,
          verifier: OutcomeVerifying) {
         self.config = config
         self.backend = backend
         self.launcher = launcher
         self.store = store
         self.processChecker = processChecker
+        self.workspace = workspace
         self.model = model
         self.verifier = verifier
     }
@@ -353,6 +357,43 @@ final class ActivationLogic {
     func jump(appName rawName: String) {
         let appName = config.resolveAlias(rawName)
         let trace = CommandTrace(command: "jump", app: appName)
+        let bundleIdentifier = config.bundleIdentifier(for: appName)
+        let frontmost = workspace.frontmostApplication
+        let targetIsFrontmost: Bool
+        if let bundleIdentifier {
+            targetIsFrontmost = frontmost?.bundleIdentifier == bundleIdentifier
+        } else {
+            targetIsFrontmost = frontmost?.localizedName.map(config.resolveAlias)
+                == appName
+        }
+
+        if !targetIsFrontmost {
+            trace.update {
+                $0.verificationTargetKind = .application
+                $0.targetBundleIdentifier = bundleIdentifier
+                $0.decidedAt = .now()
+            }
+            submit(app: appName, trace: trace) { [self] token, done in
+                Log.info("jump: activating \(appName)")
+                self.launcher.activate(
+                    appName: appName,
+                    bundleIdentifier: bundleIdentifier
+                ) { result in
+                    guard self.isActive(token) else { done(); return }
+                    trace.update {
+                        $0.path = result.path.rawValue
+                        $0.actionedAt = .now()
+                        if !result.success {
+                            $0.outcome = "failed"
+                            $0.detail = result.detail
+                        }
+                    }
+                    done()
+                }
+            }
+            return
+        }
+
         submit(app: appName, trace: trace) { [self] token, done in
             Log.info("jump: \(appName)")
             self.performJump(appName: appName, trace: trace, token: token, done: done)

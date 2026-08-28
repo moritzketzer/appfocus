@@ -28,6 +28,7 @@ private struct FuzzRNG: RandomNumberGenerator {
 
 private struct Harness: @unchecked Sendable {
     let backend: MockWindowBackend
+    let workspace: MockApplicationWorkspace
     let launcher: MockAppLauncher
     let store: StateStore
     let model: WindowModelStore
@@ -36,14 +37,18 @@ private struct Harness: @unchecked Sendable {
     let logic: ActivationLogic
 
     init(aliases: [String: String] = [:],
-         strategies: [String: ReopenStrategy] = [:]) {
+         strategies: [String: ReopenStrategy] = [:],
+         bundles: [String: String] = [:]) {
         let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
         let config = AppFocusConfig(
             backend: "yabai", yabaiPath: "/usr/bin/true",
             aliases: aliases, reopenStrategies: strategies,
-            bundleIdentifiers: [:],
+            bundleIdentifiers: bundles,
             pollIntervalMs: 2000)
         backend = MockWindowBackend()
+        workspace = MockApplicationWorkspace()
+        workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
         launcher = MockAppLauncher()
         store = StateStore(stateDir: dir)
         model = WindowModelStore()
@@ -54,7 +59,8 @@ private struct Harness: @unchecked Sendable {
         logic = ActivationLogic(config: config, backend: backend,
                                  launcher: launcher, store: store,
                                  processChecker: processChecker,
-                                 model: model, verifier: telemetry)
+                                 workspace: workspace, model: model,
+                                 verifier: telemetry)
         // Disable the hung-yabai watchdog by default: tests that defer mock
         // completions hold a command "running" for the test's duration, which
         // under parallel execution can exceed the production deadline and let
@@ -88,6 +94,93 @@ private struct Harness: @unchecked Sendable {
 struct ActivationLogicTests {
 
     // MARK: - Query-free hot path
+
+    @Test func passwordsCrossAppJumpUsesNativeActivationWithoutYabai() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .nativeBundle,
+            bundleIdentifier: "com.apple.Passwords", detail: nil)
+        h.backend.windows = [win(7, app: "Passwords")]
+        h.sync()
+
+        h.logic.jump(appName: "Passwords")
+        h.settle()
+
+        #expect(h.launcher.activationCalls == [ApplicationActivationCall(
+            appName: "Passwords", bundleIdentifier: "com.apple.Passwords")])
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusCalls.isEmpty)
+        #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
+        #expect(h.telemetry.verified.first?.path == "native-bundle")
+    }
+
+    @Test func safariCrossAppJumpUsesNativeActivationWithoutModel() {
+        let h = Harness(bundles: ["Safari": "com.apple.Safari"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.cmuxterm.app", localizedName: "cmux")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .nativeBundle,
+            bundleIdentifier: "com.apple.Safari", detail: nil)
+
+        h.logic.jump(appName: "Safari")
+        h.settle()
+
+        #expect(h.launcher.activationCalls.count == 1)
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusCalls.isEmpty)
+    }
+
+    @Test func genericCrossAppJumpUsesLegacyNamePath() {
+        let h = Harness()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .legacyName,
+            bundleIdentifier: nil, detail: nil)
+
+        h.logic.jump(appName: "Generic App")
+        h.settle()
+
+        #expect(h.launcher.activationCalls == [ApplicationActivationCall(
+            appName: "Generic App", bundleIdentifier: nil)])
+        #expect(h.telemetry.verified.first?.path == "legacy-name")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusCalls.isEmpty)
+    }
+
+    @Test func crossAppJumpResolvesAliasBeforeBundleLookup() {
+        let h = Harness(
+            aliases: ["Word": "Microsoft Word"],
+            bundles: ["Microsoft Word": "com.microsoft.Word"])
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
+        h.launcher.activationResult = ApplicationActionResult(
+            success: true, path: .nativeBundle,
+            bundleIdentifier: "com.microsoft.Word", detail: nil)
+
+        h.logic.jump(appName: "Word")
+        h.settle()
+
+        #expect(h.launcher.activationCalls == [ApplicationActivationCall(
+            appName: "Microsoft Word", bundleIdentifier: "com.microsoft.Word")])
+    }
+
+    @Test func failedCrossAppActivationRecordsFailureWithoutYabai() {
+        let h = Harness(bundles: ["Passwords": "com.apple.Passwords"])
+        h.launcher.activationResult = ApplicationActionResult(
+            success: false, path: .nativeBundle,
+            bundleIdentifier: "com.apple.Passwords", detail: "open failed")
+
+        h.logic.jump(appName: "Passwords")
+        h.settle()
+
+        #expect(h.telemetry.immediate.first?.outcome == "failed")
+        #expect(h.telemetry.immediate.first?.detail == "open failed")
+        #expect(h.backend.queryAllWindowsCallCount == 0)
+        #expect(h.backend.focusCalls.isEmpty)
+    }
 
     @Test func jumpWithWindowsInModelIssuesNoQueries() {
         let h = Harness()
@@ -360,8 +453,12 @@ struct ActivationLogicTests {
         h.processChecker.runningApps.insert("Obsidian")
         h.backend.focusSpaceCompletesImmediately = false
 
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Obsidian")
         h.logic.jump(appName: "Obsidian")   // in-flight: focusSpace(5) pending
         h.settle(ms: 50_000)
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Safari")
         h.logic.jump(appName: "Safari")     // supersedes; model focus = Safari
         h.settle(ms: 100_000)
 
@@ -384,6 +481,8 @@ struct ActivationLogicTests {
         h.backend.windows = [win(1, app: "Visual Studio Code")]
         h.backend.focusedWin = win(99, app: "Other")
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Visual Studio Code")
 
         h.logic.jump(appName: "Visual Studio Code")
         h.settle()
@@ -400,6 +499,8 @@ struct ActivationLogicTests {
         h.backend.windows = [win(1, app: "Code"), win(2, app: "Code")]
         h.backend.focusedWin = win(99, app: "Other")
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Code")
 
         h.logic.jump(appName: "Visual Studio Code")
         h.settle()
@@ -479,6 +580,8 @@ struct ActivationLogicTests {
         h.store.update(appName: "cmux") { state in
             state.ring = [1, 2]
         }
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "cmux")
 
         let presses = 8
         for _ in 0..<presses {
@@ -533,6 +636,8 @@ struct ActivationLogicTests {
         h.sync()
         h.backend.focusWindowCompletesImmediately = false
         h.processChecker.runningApps.insert("cmux")
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "cmux")
 
         for _ in 0..<10 { h.logic.jump(appName: "cmux") }
 
@@ -571,7 +676,11 @@ struct ActivationLogicTests {
             let commands = Int.random(in: 1...12, using: &rng)
             for _ in 0..<commands {
                 switch Int.random(in: 0...3, using: &rng) {
-                case 0, 1: h.logic.jump(appName: apps[Int.random(in: 0..<apps.count, using: &rng)])
+                case 0, 1:
+                    let app = apps[Int.random(in: 0..<apps.count, using: &rng)]
+                    h.workspace.frontmostApplication = ApplicationIdentity(
+                        bundleIdentifier: nil, localizedName: app)
+                    h.logic.jump(appName: app)
                 case 2: h.logic.cycle(direction: .next)
                 default: h.logic.cycle(direction: .prev)
                 }
@@ -698,7 +807,11 @@ struct ActivationLogicTests {
         h.sync()
         h.backend.focusSpaceCompletesImmediately = false
 
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Safari")
         h.logic.jump(appName: "Safari")
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Code")
         h.logic.jump(appName: "Code")
         h.settle()
 
@@ -883,7 +996,11 @@ struct ActivationLogicTests {
         h.sync()
         h.backend.focusSpaceCompletesImmediately = false
 
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Safari")
         h.logic.jump(appName: "Safari")
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Code")
         h.logic.jump(appName: "Code")     // supersedes Safari mid-flight
         h.settle()
 
@@ -946,6 +1063,8 @@ struct ActivationLogicTests {
         h.backend.windows = [win(40, app: "ChatGPT", space: 4,
                                  subrole: "", role: "", ax: false)]
         // model not synced — confirm branch runs and sees the AX-less window
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
@@ -963,6 +1082,8 @@ struct ActivationLogicTests {
         h.processChecker.runningApps = ["ChatGPT"]
         h.backend.windows = [win(41, app: "ChatGPT", subrole: "AXDialog",
                                  sticky: true, floating: true)]
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
@@ -980,6 +1101,8 @@ struct ActivationLogicTests {
         h.backend.windows = [win(42, app: "ChatGPT", subrole: "",
                                  sticky: true, floating: true,
                                  role: "", ax: false)]
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
@@ -1098,6 +1221,8 @@ struct ActivationLogicTests {
         h.backend.windows = []
         h.backend.focusedWin = nil
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "Visual Studio Code")
 
         h.logic.jump(appName: "Code")
         h.settle()
@@ -1142,6 +1267,8 @@ struct ActivationLogicTests {
 
         h.backend.focusedWin = real1  // focused on the real window 786
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
         h.logic.jump(appName: "ChatGPT")
         h.settle()
 
@@ -1179,6 +1306,8 @@ struct ActivationLogicTests {
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog  // focused ON the sticky dialog
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
@@ -1197,6 +1326,8 @@ struct ActivationLogicTests {
         h.backend.windows = [real, dialog]
         h.backend.focusedWin = dialog
         h.sync()
+        h.workspace.frontmostApplication = ApplicationIdentity(
+            bundleIdentifier: nil, localizedName: "ChatGPT")
 
         h.logic.jump(appName: "ChatGPT")
         h.settle()
