@@ -59,3 +59,31 @@ history:
     reason: >-
       The Nix fixed-output source must be available on main before its package
       can build and deploy. Retain this worktree for live evidence and archive.
+  - date: 2026-09-21
+    event: package-verified
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Nix commit 8db918419 pins reviewed source 9582a8e. Focused Darwin prewarm
+      run 12740363af2e93dd92c1194af5762180 exited 0 in 74 seconds and imported
+      /nix/store/dy8lx62nq0bpf16lrvx5904lzh2xav8q-appfocus-0.1.0.
+      Initial system preparation succeeded but promotion stopped because main
+      advanced to signed commit 2271c8ba4; the appfocus pin is unchanged.
+  - date: 2026-09-21
+    event: deployed
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      just switch completed at signed Nix revision 2271c8ba4, containing pin
+      update 8db918419. Running appfocusd PID 68212 uses the verified dy8lx62
+      package. Active immutable gotcha reference and restored focus checked.
+  - date: 2026-09-21
+    event: acceptance-partial
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Functional live checks passed with stable Zotero PID 31052, no errors,
+      and cold fixture launch via production resolver. Benchmark and focused
+      probes exceeded latency limits; exact results are in the specification.
+      Asked Moritz whether to close the Zotero fix with the latency limitation
+      documented or expand work to investigate and repair activation latency.

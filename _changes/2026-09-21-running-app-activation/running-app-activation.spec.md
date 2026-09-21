@@ -126,3 +126,51 @@ Rollback restores the previous appfocus pin, revision
 `0bcf23a02090752bba53eff6e7678a3250cae8a3`, through the normal nix-config delivery
 route and reactivates the MacBook. No user-data rollback is needed. Stop when
 the regression, full suite, deployed identity, and live acceptance pass.
+
+## Implemented State and Verification (2026-09-21)
+
+Source commit `9582a8e15aa0f668523c14ab8417042652b30060` changes only
+`Sources/Daemon/ApplicationWorkspace.swift`, adds the six production-boundary
+tests in `Tests/Unit/ApplicationWorkspaceTests.swift`, and adds
+`Tests/Fixtures/ColdLaunch.swift`. No launcher or benchmark change was needed.
+The tests use AppKit subclasses through the existing workspace initializer;
+production has no new test seam or dependency.
+
+The original selector failed 13 assertions in the new regressions. After the
+fix, `make all` passed without compiler warnings and `make test` passed all
+192 tests in 15 suites in 9.066 seconds. Independent reviewer
+`review_appfocus` approved the complete source diff from `80679be` to
+`9582a8e` with no actionable findings.
+
+Nix commit `8db918419542a6637c97b76c74ee5873093e0535` pins that reviewed source
+with hash `sha256-GBpr18FDeJjRNAOYFAwadRr9UhBJGhxSycEt3kUwgRw=` and records
+the observed duplicate-registration case in the existing gotcha reference.
+Focused Darwin prewarm run `12740363af2e93dd92c1194af5762180` passed in 74
+seconds. The first system deployment stopped safely when concurrent signed
+commit `2271c8ba49323265f7f4833e9493a202cb906fba` advanced main; it does not
+change the appfocus pin. A second `just switch` completed successfully,
+including signed cache replication. The live daemon is PID 68212 at
+`/nix/store/dy8lx62nq0bpf16lrvx5904lzh2xav8q-appfocus-0.1.0/bin/appfocusd`.
+The new gotcha reference was read back from the active system's immutable
+catalog. Existing Nix deprecation warnings and transient SQLite contention did
+not prevent the build or deployment.
+
+Functional live acceptance passed: 20 Zotero returns among 40 alternating
+Spotify/Zotero jumps, another 40 same-Space Spotify/Mail jumps, and two fixture
+launches all reached their intended app. Zotero retained PID 31052 and the
+daemon logged no new errors. The second fixture launch used the production
+bundle resolver after the first process had exited; both callback and
+frontmost identity passed. Both fixture processes exited after the tests.
+The original cmux window 699 on Space 8 was restored and checked.
+
+**Performance acceptance remains open.** The unmodified foreground benchmark
+reported zero failures in 21 trials and zero bad telemetry outcomes, but
+cross-Space p95 was 1,070 ms against 700 ms. Its same-Space MRU and cycle
+scenarios were skipped because no eligible two-window pair was available.
+The focused probe measured cross-Space p95 722.0 ms and same-Space p95
+473.5 ms, above the required 700/300 ms limits. A subsequent 12-transition
+same-Space comparison measured appfocus at 157.2–544.9 ms versus
+`/usr/bin/open -b` at 142.3–263.2 ms. This comparison establishes an observable
+latency gap; it does not establish whether this change introduced it.
+No performance fix, animation setting, or alternate activation strategy was
+implemented. Completion and archive await disposition of this unmet gate.
