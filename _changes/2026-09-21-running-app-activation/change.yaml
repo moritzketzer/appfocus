@@ -1,5 +1,5 @@
 created: 2026-09-21
-status: draft
+status: active
 history:
   - date: 2026-09-21
     event: created
@@ -12,3 +12,19 @@ history:
     reason: >-
       Draft for review after the Zotero launch-path diagnosis and AltTab
       source comparison. Implementation and deployment await approval.
+  - date: 2026-09-21
+    event: spec-approved
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: 'Moritz: approved. go. fix it and deploy'
+  - date: 2026-09-21
+    event: plan-written
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    publication: bundled
+    reason: Implementation continues in this isolated worktree and session.
+  - date: 2026-09-21
+    event: execution-started
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    branch: change/running-app-activation
