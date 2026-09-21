@@ -28,3 +28,18 @@ history:
     session: 01a0c3a5-a637-7701-b41d-a42710d95c29
     tool: codex
     branch: change/running-app-activation
+  - date: 2026-09-21
+    event: implementation-verified
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Existing code failed the new selector and launcher regressions with 13
+      assertions. The live-first selector passes make all and all 192 tests
+      in 15 suites (9.066 seconds), without compiler warnings.
+  - date: 2026-09-21
+    event: review-selected
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      One independent standard review checks AppKit boundary fidelity and
+      approved behavior coverage, beyond the substituted OS data in unit tests.

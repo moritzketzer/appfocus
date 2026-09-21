@@ -48,7 +48,16 @@ final class SystemApplicationWorkspace: ApplicationWorkspace {
     }
 
     func applicationURL(bundleIdentifier: String) -> URL? {
-        workspace.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        if let app = workspace.frontmostApplication,
+           app.bundleIdentifier == bundleIdentifier, !app.isTerminated,
+           let url = app.bundleURL {
+            return url
+        }
+        for app in workspace.runningApplications
+            where app.bundleIdentifier == bundleIdentifier && !app.isTerminated {
+            if let url = app.bundleURL { return url }
+        }
+        return workspace.urlForApplication(withBundleIdentifier: bundleIdentifier)
     }
 
     func openApplication(
