@@ -1,0 +1,14 @@
+created: 2026-09-21
+status: draft
+history:
+  - date: 2026-09-21
+    event: created
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+  - date: 2026-09-21
+    event: spec-written
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Draft for review after the Zotero launch-path diagnosis and AltTab
+      source comparison. Implementation and deployment await approval.
