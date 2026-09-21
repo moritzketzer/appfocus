@@ -174,3 +174,33 @@ same-Space comparison measured appfocus at 157.2–544.9 ms versus
 latency gap; it does not establish whether this change introduced it.
 No performance fix, animation setting, or alternate activation strategy was
 implemented. Completion and archive await disposition of this unmet gate.
+
+### Latency Measurement Follow-Up
+
+Moritz reported that switching feels snappy and requested a latency check.
+A read-only JXA observer sampled `NSWorkspace.frontmostApplication` and
+WindowServer's on-screen window order alongside the original yabai query.
+The first 48 transitions alternated appfocus and `/usr/bin/open -b` across
+same-Space and cross-Space pairs. App activation p95 was 49.6/61.0 ms for
+appfocus versus 85.2/62.7 ms for open. This does not support the earlier
+interpretation of an activation-speed gap.
+
+BetterDisplay owns a layer-zero helper window, so a second 24-transition
+probe compared WindowServer ordering among the three tested applications,
+excluding that unrelated helper. Results for appfocus (12 trials per group):
+
+| Signal, p95 | Same Space | Cross Space |
+|---|---:|---:|
+| AppKit frontmost application | 54.5 ms | 92.5 ms |
+| WindowServer test-window ordering | 138.3 ms | 179.5 ms |
+| yabai focused-and-visible confirmation | 459.6 ms | 424.4 ms |
+
+App activation median was approximately 43 ms and window ordering median was
+100–111 ms. The earlier benchmark therefore includes delayed yabai
+confirmation and must not be equated with the app's activation time. These
+are OS-state measurements, not frame-by-frame screen recordings; animation
+completion was not measured. No additional activation-code or setting change
+is justified by these observations. Production code and the deployed pin are
+unchanged. The literal yabai benchmark threshold remains unmet; any future
+benchmark revision must distinguish these signals rather than silently
+relax its threshold. The original window and Space were restored.

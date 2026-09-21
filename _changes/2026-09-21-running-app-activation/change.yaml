@@ -87,3 +87,14 @@ history:
       probes exceeded latency limits; exact results are in the specification.
       Asked Moritz whether to close the Zotero fix with the latency limitation
       documented or expand work to investigate and repair activation latency.
+  - date: 2026-09-21
+    event: latency-investigated
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Moritz requested measurement and reported snappy switching. Paired
+      AppKit/WindowServer/yabai observation found activation p95 55/93 ms
+      and test-window ordering p95 138/180 ms, versus yabai confirmation
+      p95 460/424 ms. No production change is justified. The existing
+      benchmark conflates delayed confirmation with activation latency;
+      frame-level animation timing remains unmeasured.
