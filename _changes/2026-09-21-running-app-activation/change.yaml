@@ -43,3 +43,19 @@ history:
     reason: >-
       One independent standard review checks AppKit boundary fidelity and
       approved behavior coverage, beyond the substituted OS data in unit tests.
+  - date: 2026-09-21
+    event: review-passed
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    reason: >-
+      Independent reviewer review_appfocus approved 9582a8e with no actionable
+      findings. Live LaunchServices routing, PID preservation, cold launch,
+      and focus latency remain deployment acceptance checks.
+  - date: 2026-09-21
+    event: implementation-published
+    session: 01a0c3a5-a637-7701-b41d-a42710d95c29
+    tool: codex
+    publication: intermediate
+    reason: >-
+      The Nix fixed-output source must be available on main before its package
+      can build and deploy. Retain this worktree for live evidence and archive.
