@@ -8,9 +8,11 @@ final class YabaiBackend: WindowBackend {
     /// Hard ceiling on how long a single `yabai` invocation may run. Without
     /// this, a yabai call that never exits leaks its child process forever —
     /// this is what let ~2553 stuck `yabai -m query` processes pile up in
-    /// production over a few days of uptime.
-    private static let processTimeout: TimeInterval = 3.0
-    private static let killEscalationDelay: TimeInterval = 1.0
+    /// production over a few days of uptime. Instance-mutable for tests.
+    var processTimeout: TimeInterval = 3.0
+    /// Grace period between SIGTERM and SIGKILL for a timed-out invocation.
+    /// Instance-mutable for tests.
+    var killEscalationDelay: TimeInterval = 1.0
 
     init(yabaiPath: String) {
         self.yabaiPath = yabaiPath
@@ -75,6 +77,10 @@ final class YabaiBackend: WindowBackend {
 
     private func runYabai(_ args: [String], completion: @escaping (Data?) -> Void) {
         let enqueued = DispatchTime.now()
+        // Read the mutable timeouts once, on the calling thread: the blocks
+        // below run on background queues and must not race a test's setup.
+        let timeout = processTimeout
+        let killDelay = killEscalationDelay
         queue.async {
             let started = DispatchTime.now()
             let process = Process()
@@ -132,12 +138,12 @@ final class YabaiBackend: WindowBackend {
                 }
             }
 
-            self.queue.asyncAfter(deadline: .now() + Self.processTimeout) {
+            self.queue.asyncAfter(deadline: .now() + timeout) {
                 guard process.isRunning else { return }
-                Log.debug("yabai \(args.joined(separator: " ")) timed out after \(Self.processTimeout)s, terminating")
+                Log.debug("yabai \(args.joined(separator: " ")) timed out after \(timeout)s, terminating")
                 process.terminate()
 
-                self.queue.asyncAfter(deadline: .now() + Self.killEscalationDelay) {
+                self.queue.asyncAfter(deadline: .now() + killDelay) {
                     if process.isRunning {
                         Log.debug("yabai \(args.joined(separator: " ")) ignored SIGTERM, sending SIGKILL")
                         kill(process.processIdentifier, SIGKILL)

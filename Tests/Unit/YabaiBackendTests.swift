@@ -40,9 +40,9 @@ private func reapStaleFixtureProcesses() {
 }
 
 /// Poll until the fixture process disappears or the deadline passes.
-/// SIGTERM lands at processTimeout and SIGKILL escalates 1s later; under
-/// parallel-suite load those timers drift, so a single fixed-delay check
-/// is a race, not a verification.
+/// SIGTERM lands at the backend's `processTimeout` and SIGKILL escalates
+/// `killEscalationDelay` later; under parallel-suite load those timers drift,
+/// so a single fixed-delay check is a race, not a verification.
 private func waitForFixtureProcessToDie(within seconds: TimeInterval) -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
@@ -54,10 +54,11 @@ private func waitForFixtureProcessToDie(within seconds: TimeInterval) -> Bool {
 
 // Serialized: both hang tests spawn the same fixture script and verify its
 // death via pgrep, so running them concurrently makes each test see the
-// other's still-alive fixture. The 10s completion budget leaves headroom
-// over the backend's 3s process timeout: the fuzz test floods GCD with
-// watchdog timers, and with only 2s slack the timeout timer intermittently
-// fired after the old 5s test deadline (observed 2026-08-14).
+// other's still-alive fixture. Both shorten the backend's timeouts so the
+// hang path is reached in well under a second, and keep a 15s completion
+// budget as pure drift headroom: the fuzz test floods GCD with watchdog
+// timers, and with only 2s of slack the timeout timer intermittently fired
+// after the old 5s test deadline (observed 2026-08-14).
 @Suite("YabaiBackend", .serialized)
 struct YabaiBackendTests {
 
@@ -65,6 +66,7 @@ struct YabaiBackendTests {
     func focusedWindowTimesOutOnHungProcess() {
         reapStaleFixtureProcesses()
         let backend = YabaiBackend(yabaiPath: hangingYabaiPath)
+        backend.processTimeout = 0.5
         let sem = DispatchSemaphore(value: 0)
 
         backend.focusedWindow { _ in
@@ -74,7 +76,7 @@ struct YabaiBackendTests {
         // A regression here means the completion never fires and this
         // wait times out: the underlying process leaked exactly like the
         // 2553 stuck `yabai -m query` processes found piling up in prod.
-        let outcome = sem.wait(timeout: .now() + 10)
+        let outcome = sem.wait(timeout: .now() + 15)
         #expect(outcome == .success, "focusedWindow must time out and complete, not hang forever")
         _ = waitForFixtureProcessToDie(within: 5)
     }
@@ -83,17 +85,20 @@ struct YabaiBackendTests {
     func hungProcessIsKilledAfterTimeout() {
         reapStaleFixtureProcesses()
         let backend = YabaiBackend(yabaiPath: hangingYabaiPath)
+        backend.processTimeout = 0.5
+        backend.killEscalationDelay = 0.5
         let sem = DispatchSemaphore(value: 0)
 
         backend.focusedWindow { _ in
             sem.signal()
         }
 
-        _ = sem.wait(timeout: .now() + 10)
+        _ = sem.wait(timeout: .now() + 15)
         // The completion fires at the process timeout, BEFORE the kill
-        // lands: SIGTERM is sent at that instant and SIGKILL escalates 1s
-        // later. Poll instead of asserting at a fixed delay — this is the
-        // exact leak that piled up ~2553 stuck `yabai` processes in prod.
+        // lands: SIGTERM is sent at that instant and SIGKILL escalates
+        // `killEscalationDelay` later. Poll instead of asserting at a fixed
+        // delay — this is the exact leak that piled up ~2553 stuck `yabai`
+        // processes in prod.
         #expect(waitForFixtureProcessToDie(within: 5),
                 "hung yabai child process should be killed, not orphaned")
     }
