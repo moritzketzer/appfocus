@@ -4,13 +4,28 @@ import Foundation
 /// Mock native workspace that records URL activation and emits deterministic
 /// frontmost-application notifications without touching AppKit.
 final class MockApplicationWorkspace: ApplicationWorkspace, @unchecked Sendable {
-    var frontmostApplication: ApplicationIdentity?
     var urls: [String: URL] = [:]
-    var opened: [(url: URL, activates: Bool)] = []
     var openResult: Result<ApplicationIdentity, Error> = .success(
         ApplicationIdentity(bundleIdentifier: "com.apple.Safari",
                             localizedName: "Safari"))
+
+    /// Guards the frontmost identity, the recorded opens, and the activation
+    /// handlers: the daemon writes and reads them from GCD callback threads
+    /// while the test thread asserts. Handlers and completions always run
+    /// OUTSIDE the lock — an activation handler reads back
+    /// `frontmostApplication`, which would deadlock on this NSLock.
+    private let lock = NSLock()
+    private var _frontmostApplication: ApplicationIdentity?
+    private var _opened: [(url: URL, activates: Bool)] = []
     private var handlers: [(ApplicationIdentity) -> Void] = []
+
+    var frontmostApplication: ApplicationIdentity? {
+        get { lock.lock(); defer { lock.unlock() }; return _frontmostApplication }
+        set { lock.lock(); _frontmostApplication = newValue; lock.unlock() }
+    }
+    var opened: [(url: URL, activates: Bool)] {
+        lock.lock(); defer { lock.unlock() }; return _opened
+    }
 
     func applicationURL(bundleIdentifier: String) -> URL? {
         urls[bundleIdentifier]
@@ -21,20 +36,27 @@ final class MockApplicationWorkspace: ApplicationWorkspace, @unchecked Sendable 
         activates: Bool,
         completion: @escaping (Result<ApplicationIdentity, Error>) -> Void
     ) {
-        opened.append((url, activates))
+        lock.lock()
+        _opened.append((url, activates))
+        lock.unlock()
         completion(openResult)
     }
 
     func observeActivations(
         _ handler: @escaping (ApplicationIdentity) -> Void
     ) -> AnyObject {
+        lock.lock()
         handlers.append(handler)
+        lock.unlock()
         return NSObject()
     }
 
     func emitActivation(_ identity: ApplicationIdentity) {
-        frontmostApplication = identity
-        handlers.forEach { $0(identity) }
+        lock.lock()
+        _frontmostApplication = identity
+        let observers = handlers
+        lock.unlock()
+        observers.forEach { $0(identity) }
     }
 }
 
@@ -42,51 +64,76 @@ final class MockApplicationWorkspace: ApplicationWorkspace, @unchecked Sendable 
 final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     var windows: [WindowInfo] = []
     var focusedWin: WindowInfo? = nil
-    var focusedWindowIds: [Int] = []
-    var focusedSpaces: [Int] = []
-    var focusCalls: [String] = []
     var focusSpaceCompletesImmediately = true
-    var pendingFocusSpaceCompletions: [(Bool) -> Void] = []
     var focusWindowCompletesImmediately = true
-    var pendingFocusWindowCompletions: [(Bool) -> Void] = []
     var queryAllWindowsCompletesImmediately = true
     var onDeferredQueryReady: (() -> Void)?
-    private var pendingQueryAllWindowsCompletions: [([WindowInfo]?) -> Void] = []
     /// When true, queryAllWindows reports FAILURE (nil), not an empty list.
     var queryAllWindowsFails = false
 
-    private let queryLock = NSLock()
+    /// Guards every recorded call and pending completion: the daemon appends
+    /// to them from GCD callback threads while the test thread asserts on
+    /// them. Completions always run OUTSIDE the lock — they re-enter the mock,
+    /// which would deadlock on this NSLock.
+    private let lock = NSLock()
     private var _queryAllWindowsCallCount = 0
+    private var _focusedWindowIds: [Int] = []
+    private var _focusedSpaces: [Int] = []
+    private var _focusCalls: [String] = []
+    private var _pendingFocusSpaceCompletions: [(Bool) -> Void] = []
+    private var _pendingFocusWindowCompletions: [(Bool) -> Void] = []
+    private var _pendingQueryAllWindowsCompletions: [([WindowInfo]?) -> Void] = []
+
     var queryAllWindowsCallCount: Int {
-        queryLock.lock(); defer { queryLock.unlock() }
+        lock.lock(); defer { lock.unlock() }
         return _queryAllWindowsCallCount
+    }
+    var focusedWindowIds: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return _focusedWindowIds
+    }
+    var focusedSpaces: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return _focusedSpaces
+    }
+    var focusCalls: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _focusCalls
+    }
+    var pendingFocusSpaceCompletions: [(Bool) -> Void] {
+        lock.lock(); defer { lock.unlock() }
+        return _pendingFocusSpaceCompletions
+    }
+    var pendingFocusWindowCompletions: [(Bool) -> Void] {
+        lock.lock(); defer { lock.unlock() }
+        return _pendingFocusWindowCompletions
     }
 
     func queryAllWindows(completion: @escaping ([WindowInfo]?) -> Void) {
-        queryLock.lock()
+        lock.lock()
         _queryAllWindowsCallCount += 1
         if queryAllWindowsCompletesImmediately {
             let result = queryAllWindowsFails ? nil : windows
-            queryLock.unlock()
+            lock.unlock()
             completion(result)
         } else {
-            pendingQueryAllWindowsCompletions.append(completion)
+            _pendingQueryAllWindowsCompletions.append(completion)
             let ready = onDeferredQueryReady
-            queryLock.unlock()
+            lock.unlock()
             ready?()
         }
     }
 
     @discardableResult
     func completeNextQueryAllWindows() -> Bool {
-        queryLock.lock()
-        guard !pendingQueryAllWindowsCompletions.isEmpty else {
-            queryLock.unlock()
+        lock.lock()
+        guard !_pendingQueryAllWindowsCompletions.isEmpty else {
+            lock.unlock()
             return false
         }
-        let completion = pendingQueryAllWindowsCompletions.removeFirst()
+        let completion = _pendingQueryAllWindowsCompletions.removeFirst()
         let result = queryAllWindowsFails ? nil : windows
-        queryLock.unlock()
+        lock.unlock()
         completion(result)
         return true
     }
@@ -96,33 +143,48 @@ final class MockWindowBackend: WindowBackend, @unchecked Sendable {
     }
 
     func focusWindow(id: Int, completion: @escaping (Bool) -> Void) {
-        focusedWindowIds.append(id)
-        focusCalls.append("window:\(id)")
+        lock.lock()
+        _focusedWindowIds.append(id)
+        _focusCalls.append("window:\(id)")
         if focusWindowCompletesImmediately {
+            lock.unlock()
             completion(true)
         } else {
-            pendingFocusWindowCompletions.append(completion)
+            _pendingFocusWindowCompletions.append(completion)
+            lock.unlock()
         }
     }
 
     func focusSpace(index: Int, completion: @escaping (Bool) -> Void) {
-        focusedSpaces.append(index)
-        focusCalls.append("space:\(index)")
+        lock.lock()
+        _focusedSpaces.append(index)
+        _focusCalls.append("space:\(index)")
         if focusSpaceCompletesImmediately {
+            lock.unlock()
             completion(true)
         } else {
-            pendingFocusSpaceCompletions.append(completion)
+            _pendingFocusSpaceCompletions.append(completion)
+            lock.unlock()
         }
     }
 
     func completeNextFocusSpace(success: Bool = true) {
-        pendingFocusSpaceCompletions.removeFirst()(success)
+        lock.lock()
+        let completion = _pendingFocusSpaceCompletions.removeFirst()
+        lock.unlock()
+        completion(success)
     }
 
     @discardableResult
     func completeNextFocusWindow(success: Bool = true) -> Bool {
-        guard !pendingFocusWindowCompletions.isEmpty else { return false }
-        pendingFocusWindowCompletions.removeFirst()(success)
+        lock.lock()
+        guard !_pendingFocusWindowCompletions.isEmpty else {
+            lock.unlock()
+            return false
+        }
+        let completion = _pendingFocusWindowCompletions.removeFirst()
+        lock.unlock()
+        completion(success)
         return true
     }
 }
@@ -174,28 +236,49 @@ struct ApplicationActivationCall: Equatable {
 }
 
 final class MockAppLauncher: AppLauncher, @unchecked Sendable {
-    var reopenedApps: [(String, ReopenStrategy)] = []
-    var activationCalls: [ApplicationActivationCall] = []
     var activationCompletesImmediately = true
-    var pendingActivationCompletions: [
-        (ApplicationActionResult) -> Void
-    ] = []
     var activationResult = ApplicationActionResult(
         success: true, path: .legacyName, bundleIdentifier: nil, detail: nil)
     var reopenResult = ApplicationActionResult(
         success: true, path: .reopen, bundleIdentifier: nil, detail: nil)
+
+    /// Guards the recorded calls and pending completions, same reasoning as
+    /// `MockWindowBackend`: appended from GCD callback threads, asserted on
+    /// from the test thread, completions invoked outside the lock.
+    private let lock = NSLock()
+    private var _reopenedApps: [(String, ReopenStrategy)] = []
+    private var _activationCalls: [ApplicationActivationCall] = []
+    private var _pendingActivationCompletions: [
+        (ApplicationActionResult) -> Void
+    ] = []
+
+    var reopenedApps: [(String, ReopenStrategy)] {
+        lock.lock(); defer { lock.unlock() }
+        return _reopenedApps
+    }
+    var activationCalls: [ApplicationActivationCall] {
+        lock.lock(); defer { lock.unlock() }
+        return _activationCalls
+    }
+    var pendingActivationCompletions: [(ApplicationActionResult) -> Void] {
+        lock.lock(); defer { lock.unlock() }
+        return _pendingActivationCompletions
+    }
 
     func activate(
         appName: String,
         bundleIdentifier: String?,
         completion: @escaping (ApplicationActionResult) -> Void
     ) {
-        activationCalls.append(ApplicationActivationCall(
+        lock.lock()
+        _activationCalls.append(ApplicationActivationCall(
             appName: appName, bundleIdentifier: bundleIdentifier))
         if activationCompletesImmediately {
+            lock.unlock()
             completion(activationResult)
         } else {
-            pendingActivationCompletions.append(completion)
+            _pendingActivationCompletions.append(completion)
+            lock.unlock()
         }
     }
 
@@ -203,8 +286,14 @@ final class MockAppLauncher: AppLauncher, @unchecked Sendable {
     func completeNextActivation(
         result: ApplicationActionResult? = nil
     ) -> Bool {
-        guard !pendingActivationCompletions.isEmpty else { return false }
-        pendingActivationCompletions.removeFirst()(result ?? activationResult)
+        lock.lock()
+        guard !_pendingActivationCompletions.isEmpty else {
+            lock.unlock()
+            return false
+        }
+        let completion = _pendingActivationCompletions.removeFirst()
+        lock.unlock()
+        completion(result ?? activationResult)
         return true
     }
 
@@ -213,7 +302,9 @@ final class MockAppLauncher: AppLauncher, @unchecked Sendable {
         strategy: ReopenStrategy,
         completion: @escaping (ApplicationActionResult) -> Void
     ) {
-        reopenedApps.append((appName, strategy))
+        lock.lock()
+        _reopenedApps.append((appName, strategy))
+        lock.unlock()
         completion(reopenResult)
     }
 
