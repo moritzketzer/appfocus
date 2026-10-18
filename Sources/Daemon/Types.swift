@@ -66,17 +66,17 @@ struct WindowInfo {
     /// role `AXHelpTag`. Note `is-floating` is NOT excluded: yabai floats some
     /// real app windows (System Settings), and excluding them would reopen.
     var isStandardWindow: Bool {
-        hasAXReference && isNotOverlay
+        hasAXReference && !isOverlay
     }
 
-    /// The overlay exclusion shared by both window classifications: the
-    /// tooltip role, yabai's sticky flag, and the two explicit dialog
-    /// subroles.
-    private var isNotOverlay: Bool {
-        role != "AXHelpTag"
-            && !isSticky
-            && subrole != "AXDialog"
-            && subrole != "AXSystemDialog"
+    /// The overlay marker shared by both window classifications: the tooltip
+    /// role, yabai's sticky flag, or either explicit dialog subrole. Both
+    /// classifications exclude it.
+    private var isOverlay: Bool {
+        role == "AXHelpTag"
+            || isSticky
+            || subrole == "AXDialog"
+            || subrole == "AXSystemDialog"
     }
 
     /// A window that would be a standard jump target except yabai holds no
@@ -86,7 +86,7 @@ struct WindowInfo {
     /// yabai). Such a window can't be focused directly, but its Space is
     /// known and native activation reaches it.
     var isAXlessCandidate: Bool {
-        !hasAXReference && isNotOverlay
+        !hasAXReference && !isOverlay
     }
 
     /// Parse a WindowInfo from a yabai JSON dictionary.
