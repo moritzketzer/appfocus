@@ -146,22 +146,35 @@ final class OutcomeVerifier: OutcomeVerifying {
             return
         }
         if target.kind == .application {
-            let classified = classifyApplication(trace, target: target)
-            guard generationIsCurrent(generation) else {
-                finalizeSuperseded(trace)
-                return
-            }
-            if classified {
-                pending = nil
-                write(trace)
-            } else {
-                timerArmed = true
-                queue.asyncAfter(deadline: .now() + applicationPollInterval) {
-                    self.fire()
-                }
-            }
+            fireApplication(trace, target: target, generation: generation)
             return
         }
+        fireWindow(trace, generation: generation)
+    }
+
+    // Runs on `queue`. Poll AppKit until activation lands or the bounded
+    // deadline passes; never touches yabai.
+    private func fireApplication(_ trace: CommandTrace,
+                                 target: VerificationTarget,
+                                 generation: UInt64) {
+        let classified = classifyApplication(trace, target: target)
+        guard generationIsCurrent(generation) else {
+            finalizeSuperseded(trace)
+            return
+        }
+        if classified {
+            pending = nil
+            write(trace)
+        } else {
+            timerArmed = true
+            queue.asyncAfter(deadline: .now() + applicationPollInterval) {
+                self.fire()
+            }
+        }
+    }
+
+    // Runs on `queue`. One coalesced window query, classified on the way back.
+    private func fireWindow(_ trace: CommandTrace, generation: UInt64) {
         pending = nil
         let queryStart = DispatchTime.now()
         backend.queryAllWindows { windows in
@@ -293,36 +306,51 @@ final class OutcomeVerifier: OutcomeVerifying {
         trace.update { t in
             t.verifyMs = verifyMs
             if let target = t.targetWindowId {
-                if let focused = focused, focused.id == target {
-                    t.outcome = focused.isVisible ? "ok" : "invisible"
-                    if !focused.isVisible {
-                        t.detail = appendDetail(t.detail,
-                            "focused but not visible; space=\(focused.space)")
-                    }
-                } else if let focused = focused, let app = t.app,
-                          resolveAlias(focused.appName) == app {
-                    t.outcome = "ok-app"
-                    t.detail = appendDetail(t.detail,
-                        "landed on \(focused.id), predicted \(target)")
-                } else {
-                    t.outcome = "wrong-window"
-                    t.detail = appendDetail(t.detail,
-                        "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id) space=\($0.space)" } ?? "none")")
-                }
+                classifyWindowTarget(t, target: target, focused: focused)
             } else if let app = t.app {
-                // Launch/reopen/fallback paths: no window id was predictable;
-                // success means the intended app is frontmost.
-                if let focused = focused, resolveAlias(focused.appName) == app {
-                    t.outcome = "ok-app"
-                } else {
-                    t.outcome = "wrong-window"
-                    t.detail = appendDetail(t.detail,
-                        "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id)" } ?? "none")")
-                }
+                classifyAppOnlyTarget(t, app: app, focused: focused)
             } else {
                 t.outcome = "unverified-queryfail"
                 t.detail = appendDetail(t.detail, "no target and no app")
             }
+        }
+    }
+
+    // Runs inside the trace's `update` lock: direct field access only,
+    // re-entering `update` would deadlock.
+    private func classifyWindowTarget(_ t: CommandTrace, target: Int,
+                                      focused: WindowInfo?) {
+        if let focused = focused, focused.id == target {
+            t.outcome = focused.isVisible ? "ok" : "invisible"
+            if !focused.isVisible {
+                t.detail = appendDetail(t.detail,
+                    "focused but not visible; space=\(focused.space)")
+            }
+        } else if let focused = focused, let app = t.app,
+                  resolveAlias(focused.appName) == app {
+            t.outcome = "ok-app"
+            t.detail = appendDetail(t.detail,
+                "landed on \(focused.id), predicted \(target)")
+        } else {
+            t.outcome = "wrong-window"
+            t.detail = appendDetail(t.detail,
+                "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id) space=\($0.space)" } ?? "none")")
+        }
+    }
+
+    /// Launch/reopen/fallback paths: no window id was predictable;
+    /// success means the intended app is frontmost.
+    ///
+    /// Runs inside the trace's `update` lock: direct field access only,
+    /// re-entering `update` would deadlock.
+    private func classifyAppOnlyTarget(_ t: CommandTrace, app: String,
+                                       focused: WindowInfo?) {
+        if let focused = focused, resolveAlias(focused.appName) == app {
+            t.outcome = "ok-app"
+        } else {
+            t.outcome = "wrong-window"
+            t.detail = appendDetail(t.detail,
+                "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id)" } ?? "none")")
         }
     }
 
