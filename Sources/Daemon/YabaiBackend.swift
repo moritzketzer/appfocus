@@ -19,21 +19,9 @@ final class YabaiBackend: WindowBackend {
     func queryAllWindows(completion: @escaping ([WindowInfo]?) -> Void) {
         // yabai has no --app filter; query all windows and filter client-side
         runYabai(["-m", "query", "--windows"]) { data in
-            guard let data = data else {
+            guard let json = Self.decode(data, as: [[String: Any]].self,
+                                         query: "queryAllWindows") else {
                 completion(nil)   // failed/timed-out query, NOT "no windows"
-                return
-            }
-            let json: [[String: Any]]
-            do {
-                guard let parsed = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                    Log.debug("queryAllWindows: unexpected JSON structure")
-                    completion(nil)
-                    return
-                }
-                json = parsed
-            } catch {
-                Log.debug("queryAllWindows: JSON parse failed: \(error)")
-                completion(nil)
                 return
             }
             // Return the unfiltered snapshot: the WindowModel needs every
@@ -46,24 +34,30 @@ final class YabaiBackend: WindowBackend {
 
     func focusedWindow(completion: @escaping (WindowInfo?) -> Void) {
         runYabai(["-m", "query", "--windows", "--window"]) { data in
-            guard let data = data else {
-                completion(nil)
-                return
-            }
-            let dict: [String: Any]
-            do {
-                guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    Log.debug("focusedWindow: unexpected JSON structure")
-                    completion(nil)
-                    return
-                }
-                dict = parsed
-            } catch {
-                Log.debug("focusedWindow: JSON parse failed: \(error)")
+            guard let dict = Self.decode(data, as: [String: Any].self,
+                                         query: "focusedWindow") else {
                 completion(nil)
                 return
             }
             completion(WindowInfo.from(yabaiDict: dict))
+        }
+    }
+
+    /// Decode one yabai query payload. `nil` covers a failed or timed-out
+    /// query, an unexpected JSON structure, and a parse error alike — callers
+    /// must never read it as "no windows".
+    private static func decode<T>(_ data: Data?, as type: T.Type,
+                                  query: String) -> T? {
+        guard let data = data else { return nil }
+        do {
+            guard let parsed = try JSONSerialization.jsonObject(with: data) as? T else {
+                Log.debug("\(query): unexpected JSON structure")
+                return nil
+            }
+            return parsed
+        } catch {
+            Log.debug("\(query): JSON parse failed: \(error)")
+            return nil
         }
     }
 
