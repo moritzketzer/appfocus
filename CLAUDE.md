@@ -30,6 +30,7 @@ Sources/
     KanataCommandSource.swift — TCP server: parses kanata push-msg JSON envelopes
     SocketCommandSource.swift — Unix socket server: accepts CLI connections
     ActivationLogic.swift    — Core brain: jump (MRU toggle, launch, reopen), cycle (ring-based)
+    CommandPump.swift        — Command serialization: queue/supersede, watchdog, backoff, cap, one-shot retry
     CommandTrace.swift       — Per-command telemetry record + JSONL encoding
     OutcomeVerifier.swift    — AppKit or yabai outcome classification + telemetry sink
     WindowModel.swift        — In-memory window snapshot + focused id; commands read this, not yabai
