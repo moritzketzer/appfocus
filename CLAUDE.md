@@ -24,6 +24,7 @@ Sources/
     main.swift               — CLI client: connects to daemon socket, sends command
   Daemon/
     main.swift               — Entry point: wires backends, sources, state, starts run loop
+    Types.swift              — Shared domain types: WindowInfo, AppState, ReopenStrategy
     WindowBackend.swift      — Protocol: queryAllWindows, focusedWindow, focusWindow, focusSpace
     YabaiBackend.swift       — Yabai implementation: shells out to yabai CLI, parses JSON
     CommandSource.swift      — Protocol: start/stop for command input sources
@@ -44,12 +45,25 @@ Tests/
   Unit/
     Mocks.swift              — Window, launcher, verifier, and ApplicationWorkspace mocks
     ActivationLogicTests.swift
-    StateStoreTests.swift
-    ConfigTests.swift
-    KanataParsingTests.swift
+    AppLauncherTests.swift
+    ApplicationWorkspaceTests.swift
     CommandProtocolTests.swift
+    CommandTraceTests.swift
+    ConfigTests.swift
+    FocusPollerTests.swift
+    KanataParsingTests.swift
+    OutcomeVerifierTests.swift
     ReconcileRingTests.swift
+    StateStoreTests.swift
+    TelemetryStatsTests.swift
+    WindowInfoTests.swift
+    WindowModelTests.swift
+    YabaiBackendTests.swift
     TestRunner.swift          — @main entry point for Swift Testing
+  Fixtures/                  — Not compiled into the suite; loaded by path or run by hand
+    ColdLaunch.swift         — Minimal AppKit app for manual cold-launch acceptance
+    hanging-yabai.sh         — yabai stand-in that never exits (process timeout tests)
+    large-yabai.sh           — ~20KB window dump that overflows the OS pipe buffer
 ```
 
 ## Architecture
@@ -61,7 +75,7 @@ Protocol-based design with four injected boundaries:
 - **ApplicationWorkspace** protocol — frontmost identity, bundle URL resolution, AppKit activation, and activation notifications
 - **AppLauncher** protocol — result-bearing activation and reopen operations
 
-Flow: CommandSource → ActivationLogic → ApplicationWorkspace (route) → AppLauncher (cross-app act) or WindowModel + WindowBackend (same-app act) → StateStore
+Flow: CommandSource → ActivationLogic (decide) → ApplicationWorkspace (route) → CommandPump (serialize) → AppLauncher (cross-app act) or WindowModel + WindowBackend (same-app act) → StateStore
 
 **Native/window split:** cross-app jumps read the frontmost application and
 activate through AppKit before touching the window model. These application
@@ -72,7 +86,10 @@ immediate). The sole command-time query confirms that a frontmost app has no
 eligible windows before reopening it. A stale empty model therefore cannot
 open a duplicate Finder or Safari window.
 
-ActivationLogic is the core brain. It handles:
+ActivationLogic is the decision brain: it resolves what a command means and
+submits each decision as a job. CommandPump owns the mechanics — command
+serialization, the watchdog, the backoff, the queue cap, the one-shot retry,
+and the cancellation tokens. Together they handle:
 - **jump**: focus app's best window (MRU), launch if not running, reopen if no windows
 - **MRU toggle**: double-jump same app switches to previous window
 - **cycle**: ring-based next/prev within an app's windows
@@ -98,7 +115,9 @@ activation. Window targets run one coalesced `queryAllWindows` about 350 ms
 after completion and classify
 `ok` / `ok-app` / `invisible` /
 `wrong-window` / `failed` / `noop`, plus `superseded`/`dropped-*`/`timeout`
-recorded at their sites and `unverified-burst` for coalesced-away presses.
+recorded at their sites, `unverified-burst` for coalesced-away presses, and
+`unverified-queryfail` when the verification query itself fails (outcome
+unknown, not failed).
 Command start synchronously advances a generation fence; an application poll
 or window query checks that generation again before committing, so a newer
 focus transition cannot verify an older trace. The verification dump also
@@ -122,7 +141,9 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Config
 
-`~/.config/appfocus/config.json` — all fields optional:
+`~/.config/appfocus/config.json` — `backend` and `yabai_path` are required,
+every other field is optional. A config file missing either one fails to
+decode and is discarded whole, so every default below applies:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
@@ -137,6 +158,8 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 186 tests in 14 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 194 tests in 15 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
-Run a specific test: not supported — `make test` runs all tests.
+Run a subset: `make test` builds `.build/tests`, so invoke that binary directly
+with a filter — `.build/tests --filter WindowInfo` matches suite and test names
+as a regex.

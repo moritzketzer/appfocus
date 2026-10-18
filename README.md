@@ -101,7 +101,9 @@ nix build github:moritzketzer/appfocus
 
 ## Configuration
 
-All fields are optional — defaults are sensible out of the box.
+`backend` and `yabai_path` are required; every other field is optional. A
+config file missing either one fails to decode and is discarded whole, so the
+defaults below apply.
 
 Create `~/.config/appfocus/config.json`:
 
@@ -130,7 +132,7 @@ Create `~/.config/appfocus/config.json`:
 | Field | Default | Description |
 |---|---|---|
 | `backend` | `"yabai"` | Window backend to use |
-| `yabai_path` | `"/usr/local/bin/yabai"` | Path to the yabai binary |
+| `yabai_path` | `"/etc/profiles/per-user/<user>/bin/yabai"` | Path to the yabai binary |
 | `aliases` | `{}` | Map short names to full app names |
 | `bundle_identifiers` | `{}` | Map canonical app names to stable macOS bundle identifiers |
 | `reopen_strategies` | `{"*": "reopen"}` | Per-app strategy when no windows exist (`reopen`, `makeWindow`, `makeDocument`) |
@@ -236,7 +238,7 @@ The command protocol is newline-delimited text over the Unix socket (`jump <app>
 
 ## Tests
 
-186 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
+194 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
 
 ```bash
 make test
