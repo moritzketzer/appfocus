@@ -110,8 +110,8 @@ struct WindowInfo {
                           isVisible: boolFlag(dict, "is-visible"))
     }
 
-    /// yabai reports its structural flags as `1`/`0` in some builds and as
-    /// JSON booleans in others; a missing or foreign value is false.
+    /// JSONSerialization can surface these JSON flags as a number or as a
+    /// boolean; a missing or foreign value is false.
     private static func boolFlag(_ dict: [String: Any], _ key: String) -> Bool {
         dict[key] as? Int == 1 || dict[key] as? Bool == true
     }
