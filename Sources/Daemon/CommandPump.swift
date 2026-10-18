@@ -163,7 +163,7 @@ final class CommandPump {
     /// `withPumpTransition`.
     private func dropForBackoff(_ job: PumpJob,
                                 recordNow: inout [CommandTrace]) -> String {
-        job.trace.update { $0.outcome = "dropped-backoff" }
+        job.trace.update { $0.outcome = .droppedBackoff }
         recordNow.append(job.trace)
         return "DROP \(job.app ?? "cycle") (yabai unresponsive, backing off)"
     }
@@ -179,11 +179,11 @@ final class CommandPump {
         // activation also supersedes any window job, including cycle.
         currentToken &+= 1
         if let cur = runningTrace {
-            cur.update { $0.outcome = "superseded" }
+            cur.update { $0.outcome = .superseded }
             recordNow.append(cur)
         }
         for dropped in pending {
-            dropped.trace.update { $0.outcome = "superseded" }
+            dropped.trace.update { $0.outcome = .superseded }
             recordNow.append(dropped.trace)
         }
         pending.removeAll()
@@ -209,7 +209,7 @@ final class CommandPump {
            queuedWindows.count >= self.maxPending,
            let evictionIndex = queuedWindows.first {
             let evicted = pending.remove(at: evictionIndex)
-            evicted.trace.update { $0.outcome = "dropped-cap" }
+            evicted.trace.update { $0.outcome = .droppedCap }
             recordNow.append(evicted.trace)
             action = "QUEUE \(job.app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
         } else {
@@ -303,7 +303,7 @@ final class CommandPump {
                   runningDomain == .application else { return }
             currentToken &+= 1
             if let trace = runningTrace {
-                trace.update { $0.outcome = "native-timeout" }
+                trace.update { $0.outcome = .nativeTimeout }
                 verifier.recordImmediate(trace)
             }
             next = advanceToNextOrIdle(bumpToken: false)
@@ -333,7 +333,7 @@ final class CommandPump {
                   runningDomain == .window else { return }
             currentToken &+= 1
             if let cur = runningTrace {
-                cur.update { $0.outcome = "timeout" }
+                cur.update { $0.outcome = .timeout }
                 timedOut.append(cur)
             }
             let hasNewerIntent = !pending.isEmpty
@@ -368,7 +368,7 @@ final class CommandPump {
                 retainedApplications.append(dropped)
             } else {
                 dropped.trace.update {
-                    $0.outcome = "dropped-cap"
+                    $0.outcome = .droppedCap
                     $0.detail = "backlog dropped by watchdog"
                 }
                 timedOut.append(dropped.trace)
@@ -476,7 +476,7 @@ final class CommandPump {
     /// `withPumpTransition`.
     private func handOffCompletedTrace(_ completed: CommandTrace?) {
         if let completed = completed {
-            if completed.currentOutcome == "unknown" {
+            if completed.currentOutcome == .unknown {
                 verifier.verify(completed)
             } else {
                 verifier.recordImmediate(completed)

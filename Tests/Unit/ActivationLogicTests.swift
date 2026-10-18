@@ -108,7 +108,7 @@ struct ActivationLogicTests {
         #expect(h.backend.queryAllWindowsCallCount == 0)
         #expect(h.backend.focusCalls.isEmpty)
         #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
-        #expect(h.telemetry.verified.first?.path == "native-bundle")
+        #expect(h.telemetry.verified.first?.path == .nativeBundle)
     }
 
     @Test func safariCrossAppJumpUsesNativeActivationWithoutModel() {
@@ -140,7 +140,7 @@ struct ActivationLogicTests {
 
         #expect(h.launcher.activationCalls == [ApplicationActivationCall(
             appName: "Generic App", bundleIdentifier: nil)])
-        #expect(h.telemetry.verified.first?.path == "legacy-name")
+        #expect(h.telemetry.verified.first?.path == .legacyName)
         #expect(h.backend.queryAllWindowsCallCount == 0)
         #expect(h.backend.focusCalls.isEmpty)
     }
@@ -171,7 +171,7 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Passwords")
         h.settle()
 
-        #expect(h.telemetry.immediate.first?.outcome == "failed")
+        #expect(h.telemetry.immediate.first?.outcome == .failed)
         #expect(h.telemetry.immediate.first?.detail == "open failed")
         #expect(h.backend.queryAllWindowsCallCount == 0)
         #expect(h.backend.focusCalls.isEmpty)
@@ -592,7 +592,7 @@ struct ActivationLogicTests {
             bundleIdentifier: "com.apple.Safari", localizedName: "Safari")
         h.logic.jump(appName: "Safari")
         h.settle()
-        #expect(h.telemetry.all.contains { $0.outcome == "dropped-backoff" })
+        #expect(h.telemetry.all.contains { $0.outcome == .droppedBackoff })
     }
 
     @Test func nativeTimeoutDoesNotArmWindowBackoffOrRetry() {
@@ -603,14 +603,14 @@ struct ActivationLogicTests {
 
         h.logic.jump(appName: "Passwords")
         for _ in 0..<200 where !h.telemetry.all.contains(
-            where: { $0.outcome == "native-timeout" }) {
+            where: { $0.outcome == .nativeTimeout }) {
             usleep(20_000)
         }
 
-        #expect(h.telemetry.all.contains { $0.outcome == "native-timeout" })
+        #expect(h.telemetry.all.contains { $0.outcome == .nativeTimeout })
         #expect(h.telemetry.all.first {
-            $0.outcome == "native-timeout"
-        }?.path == "native-bundle")
+            $0.outcome == .nativeTimeout
+        }?.path == .nativeBundle)
         #expect(h.logic.isIdleForTesting)
         #expect(h.backend.focusedWindowIds.isEmpty)
 
@@ -621,7 +621,7 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.focusedWindowIds == [1])
-        #expect(!h.telemetry.all.contains { $0.outcome == "dropped-backoff" })
+        #expect(!h.telemetry.all.contains { $0.outcome == .droppedBackoff })
     }
 
     @Test func nativeJumpSupersedesHangingCycle() {
@@ -641,7 +641,7 @@ struct ActivationLogicTests {
 
         #expect(h.launcher.activationCalls.last?.appName == "Passwords")
         #expect(h.telemetry.immediate.contains {
-            $0.command == "next" && $0.outcome == "superseded"
+            $0.command == "next" && $0.outcome == .superseded
         })
     }
 
@@ -663,7 +663,7 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.telemetry.verified.count == 3)
-        #expect(!h.telemetry.all.contains { $0.outcome == "dropped-cap" })
+        #expect(!h.telemetry.all.contains { $0.outcome == .droppedCap })
 
         h.workspace.frontmostApplication = ApplicationIdentity(
             bundleIdentifier: "com.apple.Passwords", localizedName: "Passwords")
@@ -700,7 +700,7 @@ struct ActivationLogicTests {
 
         #expect(h.launcher.activationCalls.count == 2)
         #expect(!h.telemetry.all.contains {
-            $0.app == "Passwords" && $0.outcome == "dropped-cap"
+            $0.app == "Passwords" && $0.outcome == .droppedCap
         })
         #expect(h.backend.focusedSpaces.count == 1)
         #expect(h.logic.isIdleForTesting)
@@ -767,7 +767,7 @@ struct ActivationLogicTests {
 
         #expect(h.launcher.activationCalls.map(\.appName) == ["Passwords", "Safari"])
         #expect(h.telemetry.immediate.contains {
-            $0.app == "Passwords" && $0.outcome == "superseded"
+            $0.app == "Passwords" && $0.outcome == .superseded
         })
 
         #expect(h.launcher.completeNextActivation())
@@ -963,7 +963,7 @@ struct ActivationLogicTests {
         #expect(resumeSent.wait(timeout: .now() + 10) == .success)
 
         for _ in 0..<200 where !h.telemetry.immediate.contains(where: {
-            $0.outcome == "superseded"
+            $0.outcome == .superseded
         }) {
             usleep(10_000)
         }
@@ -972,7 +972,7 @@ struct ActivationLogicTests {
         while h.launcher.completeNextActivation() { h.settle(ms: 10_000) }
 
         #expect(!h.telemetry.immediate.contains {
-            $0.app == "Passwords" && $0.outcome == "superseded"
+            $0.app == "Passwords" && $0.outcome == .superseded
         })
         #expect(h.logic.isIdleForTesting)
     }
@@ -1165,12 +1165,12 @@ struct ActivationLogicTests {
         #expect(h.telemetry.verified.count == 1)
         let t = h.telemetry.verified.first
         #expect(t?.command == "jump")
-        #expect(t?.path == "hot")
+        #expect(t?.path == .hot)
         #expect(t?.targetWindowId != nil)
         #expect(t?.crossedSpace == true)
         #expect(t?.decidedAt != nil)
         #expect(t?.actionedAt != nil)
-        #expect(t?.outcome == "unknown")   // classification is the verifier's job
+        #expect(t?.outcome == .unknown)   // classification is the verifier's job
     }
 
     @Test func singleWindowReassertProducesVerifiableTrace() {
@@ -1203,8 +1203,8 @@ struct ActivationLogicTests {
         h.settle()
 
         let outcomes = h.telemetry.all.map { $0.outcome }
-        #expect(outcomes.contains("timeout"))
-        #expect(outcomes.contains("dropped-backoff"))
+        #expect(outcomes.contains(.timeout))
+        #expect(outcomes.contains(.droppedBackoff))
     }
 
     @Test func supersededCommandsAreRecorded() {
@@ -1223,7 +1223,7 @@ struct ActivationLogicTests {
         h.logic.jump(appName: "Code")     // supersedes Safari mid-flight
         h.settle()
 
-        #expect(h.telemetry.immediate.contains { $0.outcome == "superseded" && $0.app == "Safari" })
+        #expect(h.telemetry.immediate.contains { $0.outcome == .superseded && $0.app == "Safari" })
 
         h.backend.completeNextFocusSpace()
         h.backend.completeNextFocusSpace()
@@ -1295,7 +1295,7 @@ struct ActivationLogicTests {
             appName: "ChatGPT", bundleIdentifier: "com.openai.codex")])
         #expect(h.launcher.reopenedApps.isEmpty)
         #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
-        #expect(h.telemetry.verified.first?.path == "native-axless")
+        #expect(h.telemetry.verified.first?.path == .nativeAxless)
     }
 
     @Test func frontmostWindowlessAppReopensWithoutPolling() {
@@ -1311,7 +1311,7 @@ struct ActivationLogicTests {
         #expect(h.launcher.reopenedApps.first?.0 == "Safari")
         #expect(h.launcher.reopenedApps.first?.1 == .makeDocument)
         #expect(h.telemetry.verified.first?.verificationTargetKind == .application)
-        #expect(h.telemetry.verified.first?.path == "reopen")
+        #expect(h.telemetry.verified.first?.path == .reopen)
     }
 
     @Test func frontmostWindowlessReopenFailureRecordsImmediately() {
@@ -1325,7 +1325,7 @@ struct ActivationLogicTests {
         h.settle()
 
         #expect(h.backend.queryAllWindowsCallCount == 1)
-        #expect(h.telemetry.immediate.first?.outcome == "failed")
+        #expect(h.telemetry.immediate.first?.outcome == .failed)
         #expect(h.telemetry.immediate.first?.detail == "osascript failed")
     }
 
@@ -1343,7 +1343,7 @@ struct ActivationLogicTests {
         #expect(h.launcher.activationCalls.isEmpty)
         #expect(h.backend.focusCalls.isEmpty)
         #expect(h.launcher.reopenedApps.count == 1)
-        #expect(h.telemetry.verified.first?.path == "reopen")
+        #expect(h.telemetry.verified.first?.path == .reopen)
     }
 
     @Test func stickyAXlessOverlayIsNotAFallbackCandidate() {
@@ -1361,7 +1361,7 @@ struct ActivationLogicTests {
         #expect(h.launcher.activationCalls.isEmpty)
         #expect(h.backend.focusedSpaces.isEmpty)
         #expect(h.launcher.reopenedApps.count == 1)
-        #expect(h.telemetry.verified.first?.path == "reopen")
+        #expect(h.telemetry.verified.first?.path == .reopen)
     }
 
     // MARK: - MRU toggle stability

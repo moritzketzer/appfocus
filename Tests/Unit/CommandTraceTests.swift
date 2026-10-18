@@ -23,14 +23,14 @@ struct CommandTraceTests {
     @Test func encodesCoreFieldsAndDurations() {
         let t0 = DispatchTime.now()
         let trace = CommandTrace(command: "jump", app: "Safari", receivedAt: t0)
-        trace.path = "hot"
+        trace.path = .hot
         trace.targetWindowId = 42
         trace.targetSpace = 2
         trace.crossedSpace = true
         trace.decidedAt = t0 + 0.010
         trace.actionedAt = t0 + 0.110
         trace.verifyMs = 350
-        trace.outcome = "ok"
+        trace.outcome = .ok
 
         let obj = parse(trace.jsonLine())
         #expect(obj["cmd"] as? String == "jump")
@@ -52,7 +52,7 @@ struct CommandTraceTests {
 
     @Test func omitsAbsentPhases() {
         let trace = CommandTrace(command: "next", app: nil)
-        trace.outcome = "dropped-backoff"
+        trace.outcome = .droppedBackoff
 
         let obj = parse(trace.jsonLine())
         #expect(obj["app"] == nil)
@@ -66,7 +66,7 @@ struct CommandTraceTests {
 
     @Test func detailIsCarried() {
         let trace = CommandTrace(command: "jump", app: "X")
-        trace.outcome = "wrong-window"
+        trace.outcome = .wrongWindow
         trace.detail = "actual=cmux/678 space=3"
         let obj = parse(trace.jsonLine())
         #expect(obj["detail"] as? String == "actual=cmux/678 space=3")

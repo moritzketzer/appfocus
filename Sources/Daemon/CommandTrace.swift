@@ -6,6 +6,51 @@ enum VerificationTargetKind: String, Equatable {
     case application
 }
 
+/// The activation path a command took. RawValues are the telemetry wire
+/// format `appfocus stats` reads, so they must not change.
+enum TracePath: String, Equatable {
+    case unknown
+    case hot
+    case confirm
+    case reopen
+    case retry
+    case noop
+    case nativeAxless = "native-axless"
+    case nativeBundle = "native-bundle"
+    case legacyName = "legacy-name"
+}
+
+/// What happened on screen (or why nothing did). RawValues are the telemetry
+/// wire format `appfocus stats` reads, so they must not change.
+enum TraceOutcome: String, Equatable {
+    case unknown
+    case failed
+    case superseded
+    case droppedBackoff = "dropped-backoff"
+    case droppedCap = "dropped-cap"
+    case timeout
+    case nativeTimeout = "native-timeout"
+    case noop
+    case ok
+    case okApp = "ok-app"
+    case invisible
+    case wrongWindow = "wrong-window"
+    case unverifiedBurst = "unverified-burst"
+    case unverifiedQueryfail = "unverified-queryfail"
+}
+
+extension ApplicationActionPath {
+    /// The launcher's result vocabulary projected into the trace's. Exhaustive
+    /// on purpose: a new launcher path must declare how it is traced.
+    var tracePath: TracePath {
+        switch self {
+        case .nativeBundle: return .nativeBundle
+        case .legacyName: return .legacyName
+        case .reopen: return .reopen
+        }
+    }
+}
+
 struct VerificationTarget {
     let kind: VerificationTargetKind
     let app: String?
@@ -33,7 +78,7 @@ final class CommandTrace {
 
     let command: String        // "jump" | "next" | "prev"
     let app: String?           // resolved target app (nil for cycle at entry)
-    var path: String = "unknown"  // hot|confirm|launch|reopen|fallback|retry|noop
+    var path: TracePath = .unknown
     var verificationTargetKind: VerificationTargetKind = .window
     var targetBundleIdentifier: String?
     var targetWindowId: Int?
@@ -45,7 +90,7 @@ final class CommandTrace {
     var decidedAt: DispatchTime?
     var actionedAt: DispatchTime?
     var verifyMs: Int?
-    var outcome: String = "unknown"
+    var outcome: TraceOutcome = .unknown
     var detail: String?
     /// Forensics captured at decision time (model state the decision used).
     var modelGeneration: UInt64?
@@ -66,7 +111,7 @@ final class CommandTrace {
     }
 
     /// Locked read of the current outcome (routing decisions).
-    var currentOutcome: String {
+    var currentOutcome: TraceOutcome {
         lock.lock(); defer { lock.unlock() }
         return outcome
     }
@@ -99,8 +144,8 @@ final class CommandTrace {
         var obj: [String: Any] = [
             "ts": Self.isoFormatter.string(from: date),
             "cmd": command,
-            "path": path,
-            "outcome": outcome,
+            "path": path.rawValue,
+            "outcome": outcome.rawValue,
             "target_kind": verificationTargetKind.rawValue,
         ]
         if let crossedSpace { obj["crossed_space"] = crossedSpace }

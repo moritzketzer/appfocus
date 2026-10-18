@@ -105,17 +105,17 @@ private struct VerifierHarness {
     func trace(_ command: String = "jump", app: String? = "Safari",
                target: Int? = nil) -> CommandTrace {
         let t = CommandTrace(command: command, app: app)
-        t.path = "hot"
+        t.path = .hot
         t.targetWindowId = target
         t.decidedAt = .now()
         t.actionedAt = .now()
-        t.outcome = "unknown"
+        t.outcome = .unknown
         return t
     }
 
     func applicationTrace(app: String, bundle: String?) -> CommandTrace {
         let t = trace(app: app)
-        t.path = bundle == nil ? "legacy-name" : "native-bundle"
+        t.path = bundle == nil ? .legacyName : .nativeBundle
         t.verificationTargetKind = .application
         t.targetBundleIdentifier = bundle
         return t
@@ -200,7 +200,7 @@ struct OutcomeVerifierTests {
         let h = VerifierHarness()
         let trace = h.applicationTrace(
             app: "Passwords", bundle: "com.apple.Passwords")
-        trace.outcome = "failed"
+        trace.outcome = .failed
 
         h.verifier.verify(trace)
 
@@ -335,12 +335,12 @@ struct OutcomeVerifierTests {
         verifier.applicationVerificationTimeout = 1.0
         verifier.applicationPollInterval = 0.01
         let trace = CommandTrace(command: "jump", app: "Passwords")
-        trace.path = "native-bundle"
+        trace.path = .nativeBundle
         trace.verificationTargetKind = .application
         trace.targetBundleIdentifier = "com.apple.Passwords"
         trace.decidedAt = .now()
         trace.actionedAt = .now()
-        trace.outcome = "unknown"
+        trace.outcome = .unknown
 
         verifier.verify(trace)
         #expect(workspace.frontmostReadStarted.wait(
@@ -411,7 +411,7 @@ struct OutcomeVerifierTests {
     @Test func preFailedTraceRecordsWithoutQuery() {
         let h = VerifierHarness()
         let t = h.trace(target: 1)
-        t.outcome = "failed"
+        t.outcome = .failed
         h.verifier.verify(t)
         let recs = h.waitForRecords(1)
         #expect(recs.first?["outcome"] as? String == "failed")
@@ -421,7 +421,7 @@ struct OutcomeVerifierTests {
     @Test func recordImmediateWrites() {
         let h = VerifierHarness()
         let t = h.trace()
-        t.outcome = "dropped-backoff"
+        t.outcome = .droppedBackoff
         h.verifier.recordImmediate(t)
         let recs = h.waitForRecords(1)
         #expect(recs.first?["outcome"] as? String == "dropped-backoff")
@@ -441,7 +441,7 @@ struct OutcomeVerifierTests {
         h.backend.windows = [win(1, hasFocus: true)]
         for i in 0..<8 {
             let t = h.trace()
-            t.outcome = "noop"
+            t.outcome = .noop
             t.detail = "filler-\(i)-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
             h.verifier.recordImmediate(t)
         }

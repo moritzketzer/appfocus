@@ -92,7 +92,7 @@ final class OutcomeVerifier: OutcomeVerifying {
             guard let replaced = self.pending,
                   self.pendingGeneration < generation else { return }
             self.pending = nil
-            replaced.update { $0.outcome = "unverified-burst" }
+            replaced.update { $0.outcome = .unverifiedBurst }
             self.write(replaced)
             // The armed timer finds `pending == nil` and no-ops.
         }
@@ -103,17 +103,17 @@ final class OutcomeVerifier: OutcomeVerifying {
         queue.async {
             // Pre-classified completions (e.g. the focus action itself
             // reported failure) are recorded as-is without a query.
-            if trace.currentOutcome == "failed" {
+            if trace.currentOutcome == .failed {
                 self.write(trace)
                 return
             }
             guard self.generationIsCurrent(generation) else {
-                trace.update { $0.outcome = "unverified-burst" }
+                trace.update { $0.outcome = .unverifiedBurst }
                 self.write(trace)
                 return
             }
             if let replaced = self.pending {
-                replaced.update { $0.outcome = "unverified-burst" }
+                replaced.update { $0.outcome = .unverifiedBurst }
                 self.write(replaced)
             }
             self.pending = trace
@@ -183,7 +183,7 @@ final class OutcomeVerifier: OutcomeVerifying {
                     self.classify(trace, windows: windows,
                                   queryStart: queryStart)
                 } else {
-                    trace.update { $0.outcome = "unverified-burst" }
+                    trace.update { $0.outcome = .unverifiedBurst }
                 }
                 self.write(trace)
             }
@@ -210,7 +210,7 @@ final class OutcomeVerifier: OutcomeVerifying {
     // Runs on `queue` while `pending` still refers to `trace`.
     private func finalizeSuperseded(_ trace: CommandTrace) {
         pending = nil
-        trace.update { $0.outcome = "unverified-burst" }
+        trace.update { $0.outcome = .unverifiedBurst }
         write(trace)
     }
 
@@ -232,7 +232,7 @@ final class OutcomeVerifier: OutcomeVerifying {
         guard target.bundleIdentifier != nil || target.app != nil else {
             trace.update { t in
                 t.verifyMs = 0
-                t.outcome = "unverified-queryfail"
+                t.outcome = .unverifiedQueryfail
                 t.detail = appendDetail(t.detail,
                     "no application target identity")
             }
@@ -245,7 +245,7 @@ final class OutcomeVerifier: OutcomeVerifying {
             trace.update { t in
                 t.verifyMs = elapsedMilliseconds(
                     from: target.evidenceAfter, to: now)
-                t.outcome = "ok-app"
+                t.outcome = .okApp
             }
             return true
         }
@@ -260,7 +260,7 @@ final class OutcomeVerifier: OutcomeVerifying {
         trace.update { t in
             t.verifyMs = elapsedMilliseconds(
                 from: target.evidenceAfter, to: now)
-            t.outcome = "wrong-window"
+            t.outcome = .wrongWindow
             let identity = actual.map {
                 "\($0.bundleIdentifier ?? "unknown")/\($0.localizedName ?? "unknown")"
             } ?? "none"
@@ -294,7 +294,7 @@ final class OutcomeVerifier: OutcomeVerifying {
     private func classify(_ trace: CommandTrace, windows: [WindowInfo]?,
                           queryStart: DispatchTime) {
         guard let windows = windows else {
-            trace.update { $0.outcome = "unverified-queryfail" }
+            trace.update { $0.outcome = .unverifiedQueryfail }
             return
         }
         let verifyMs = Int((DispatchTime.now().uptimeNanoseconds
@@ -310,7 +310,7 @@ final class OutcomeVerifier: OutcomeVerifying {
             } else if let app = t.app {
                 classifyAppOnlyTarget(t, app: app, focused: focused)
             } else {
-                t.outcome = "unverified-queryfail"
+                t.outcome = .unverifiedQueryfail
                 t.detail = appendDetail(t.detail, "no target and no app")
             }
         }
@@ -321,18 +321,18 @@ final class OutcomeVerifier: OutcomeVerifying {
     private func classifyWindowTarget(_ t: CommandTrace, target: Int,
                                       focused: WindowInfo?) {
         if let focused = focused, focused.id == target {
-            t.outcome = focused.isVisible ? "ok" : "invisible"
+            t.outcome = focused.isVisible ? .ok : .invisible
             if !focused.isVisible {
                 t.detail = appendDetail(t.detail,
                     "focused but not visible; space=\(focused.space)")
             }
         } else if let focused = focused, let app = t.app,
                   resolveAlias(focused.appName) == app {
-            t.outcome = "ok-app"
+            t.outcome = .okApp
             t.detail = appendDetail(t.detail,
                 "landed on \(focused.id), predicted \(target)")
         } else {
-            t.outcome = "wrong-window"
+            t.outcome = .wrongWindow
             t.detail = appendDetail(t.detail,
                 "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id) space=\($0.space)" } ?? "none")")
         }
@@ -346,9 +346,9 @@ final class OutcomeVerifier: OutcomeVerifying {
     private func classifyAppOnlyTarget(_ t: CommandTrace, app: String,
                                        focused: WindowInfo?) {
         if let focused = focused, resolveAlias(focused.appName) == app {
-            t.outcome = "ok-app"
+            t.outcome = .okApp
         } else {
-            t.outcome = "wrong-window"
+            t.outcome = .wrongWindow
             t.detail = appendDetail(t.detail,
                 "actual=\(focused.map { "\(resolveAlias($0.appName))/\($0.id)" } ?? "none")")
         }

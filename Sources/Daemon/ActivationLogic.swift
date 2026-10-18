@@ -70,7 +70,7 @@ final class ActivationLogic {
     /// that consumed the armed retry.
     private func replayFocusRetry(_ retry: CommandPump.RetryTarget) {
         let trace = CommandTrace(command: "jump", app: retry.appName)
-        trace.update { $0.path = "retry" }
+        trace.update { $0.path = .retry }
         pump.submit(domain: .window, app: retry.appName, trace: trace,
                     userInitiated: false) { [self] token, done in
             let windows = self.model.snapshot().windows
@@ -78,7 +78,7 @@ final class ActivationLogic {
                   target.isStandardWindow, !target.isMinimized else {
                 Log.info("retry: window \(retry.windowId) gone, dropping")
                 trace.update {
-                    $0.outcome = "noop"
+                    $0.outcome = .noop
                     $0.detail = "retry target gone"
                 }
                 done(); return
@@ -97,7 +97,7 @@ final class ActivationLogic {
     private func failTrace(_ trace: CommandTrace, _ detail: String,
                            done: () -> Void) {
         trace.update {
-            $0.outcome = "failed"
+            $0.outcome = .failed
             $0.detail = detail
         }
         done()
@@ -119,9 +119,7 @@ final class ActivationLogic {
 
         if !isFrontmost(appName: appName, bundleIdentifier: bundleIdentifier) {
             trace.update {
-                $0.path = bundleIdentifier == nil
-                    ? ApplicationActionPath.legacyName.rawValue
-                    : ApplicationActionPath.nativeBundle.rawValue
+                $0.path = bundleIdentifier == nil ? .legacyName : .nativeBundle
                 $0.verificationTargetKind = .application
                 $0.targetBundleIdentifier = bundleIdentifier
                 $0.decidedAt = .now()
@@ -163,10 +161,10 @@ final class ActivationLogic {
         ) { [self] result in
             guard isActive(token) else { done(); return }
             trace.update {
-                $0.path = result.path.rawValue
+                $0.path = result.path.tracePath
                 $0.actionedAt = .now()
                 if !result.success {
-                    $0.outcome = "failed"
+                    $0.outcome = .failed
                     $0.detail = result.detail
                 }
             }
@@ -199,11 +197,11 @@ final class ActivationLogic {
             $0.modelFocusedId = snapshot.focusedId
         }
         if windows.isEmpty {
-            trace.update { $0.path = "confirm" }
+            trace.update { $0.path = .confirm }
             confirmNoWindows(appName: appName, focused: focused,
                              trace: trace, token: token, done: done)
         } else {
-            trace.update { $0.path = "hot" }
+            trace.update { $0.path = .hot }
             handleHasWindows(appName: appName, windows: windows,
                              focused: focused, trace: trace,
                              token: token, done: done)
@@ -259,7 +257,7 @@ final class ActivationLogic {
         if !axlessCandidates.isEmpty {
             Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — activating natively; tiling needs a warm yabai restart (see gotchas)")
             trace.update {
-                $0.path = "native-axless"
+                $0.path = .nativeAxless
             }
             launcher.activate(
                 appName: appName,
@@ -272,7 +270,7 @@ final class ActivationLogic {
         }
 
         Log.info("jump: \(appName) frontmost without windows, reopening")
-        trace.update { $0.path = "reopen" }
+        trace.update { $0.path = .reopen }
         launcher.reopen(
             appName: appName,
             strategy: config.reopenStrategy(for: appName)
@@ -292,7 +290,7 @@ final class ActivationLogic {
         trace.update {
             $0.actionedAt = .now()
             if !result.success {
-                $0.outcome = "failed"
+                $0.outcome = .failed
                 $0.detail = result.detail
             }
         }
@@ -497,7 +495,7 @@ final class ActivationLogic {
             } else {
                 Log.error("focus: yabai focus failed for window \(target.id)")
                 trace.update {
-                    $0.outcome = "failed"
+                    $0.outcome = .failed
                     $0.detail = "yabai window focus failed"
                 }
             }
@@ -517,8 +515,8 @@ final class ActivationLogic {
         guard windows.count > 1 else {
             Log.info("cycle: only \(windows.count) window(s)")
             trace.update {
-                $0.path = "noop"
-                $0.outcome = "noop"
+                $0.path = .noop
+                $0.outcome = .noop
                 $0.detail = "only \(windows.count) window(s)"
             }
             done(); return
@@ -531,8 +529,8 @@ final class ActivationLogic {
         let ring = store.state(for: appName).ring
         guard ring.count > 1 else {
             trace.update {
-                $0.path = "noop"
-                $0.outcome = "noop"
+                $0.path = .noop
+                $0.outcome = .noop
                 $0.detail = "ring too small"
             }
             done(); return
@@ -569,7 +567,7 @@ final class ActivationLogic {
         // into the model (optimistic update).
         let snapshot = model.snapshot()
         trace.update {
-            $0.path = "hot"
+            $0.path = .hot
             $0.modelGeneration = snapshot.generation
             $0.modelFocusedId = snapshot.focusedId
         }
