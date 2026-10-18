@@ -338,7 +338,8 @@ final class OutcomeVerifier: OutcomeVerifying {
         }
     }
 
-    /// Launch/reopen/fallback paths: no window id was predictable;
+    /// The `native-bundle`, `legacy-name`, `native-axless`, and `reopen`
+    /// paths: no window id was predictable;
     /// success means the intended app is frontmost.
     ///
     /// Runs inside the trace's `update` lock: direct field access only,

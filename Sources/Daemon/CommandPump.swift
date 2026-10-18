@@ -9,7 +9,10 @@ final class CommandPump {
     private let verifier: OutcomeVerifying
 
     /// Replays the focus action of a watchdog-dropped command. Set by the
-    /// owner after construction, because it closes over the owner.
+    /// owner after construction, because it closes over the owner — set once,
+    /// before the first submit, and never reassigned: a reassignment racing a
+    /// retry fire is a data race. Left unwired, consumed retries vanish
+    /// silently.
     var retryRunner: (RetryTarget) -> Void = { _ in }
 
     /// Serial queue guarding the command pump's mutable state
