@@ -66,8 +66,14 @@ struct WindowInfo {
     /// role `AXHelpTag`. Note `is-floating` is NOT excluded: yabai floats some
     /// real app windows (System Settings), and excluding them would reopen.
     var isStandardWindow: Bool {
-        hasAXReference
-            && role != "AXHelpTag"
+        hasAXReference && isNotOverlay
+    }
+
+    /// The overlay exclusion shared by both window classifications: the
+    /// tooltip role, yabai's sticky flag, and the two explicit dialog
+    /// subroles.
+    private var isNotOverlay: Bool {
+        role != "AXHelpTag"
             && !isSticky
             && subrole != "AXDialog"
             && subrole != "AXSystemDialog"
@@ -80,11 +86,7 @@ struct WindowInfo {
     /// yabai). Such a window can't be focused directly, but its Space is
     /// known and native activation reaches it.
     var isAXlessCandidate: Bool {
-        !hasAXReference
-            && role != "AXHelpTag"
-            && !isSticky
-            && subrole != "AXDialog"
-            && subrole != "AXSystemDialog"
+        !hasAXReference && isNotOverlay
     }
 
     /// Parse a WindowInfo from a yabai JSON dictionary.
@@ -94,26 +96,24 @@ struct WindowInfo {
               let space = dict["space"] as? Int,
               let title = dict["title"] as? String
         else { return nil }
-        let isMinimized = dict["is-minimized"] as? Int == 1
-            || dict["is-minimized"] as? Bool == true
         let role = dict["role"] as? String ?? ""
         let subrole = dict["subrole"] as? String ?? ""
-        let hasAXRef = dict["has-ax-reference"] as? Int == 1
-            || dict["has-ax-reference"] as? Bool == true
-        let isSticky = dict["is-sticky"] as? Int == 1
-            || dict["is-sticky"] as? Bool == true
-        let isFloating = dict["is-floating"] as? Int == 1
-            || dict["is-floating"] as? Bool == true
-        let hasFocus = dict["has-focus"] as? Int == 1
-            || dict["has-focus"] as? Bool == true
-        let isVisible = dict["is-visible"] as? Int == 1
-            || dict["is-visible"] as? Bool == true
         return WindowInfo(id: id, appName: app, space: space,
-                          isMinimized: isMinimized, role: role,
-                          title: title, hasAXReference: hasAXRef,
-                          subrole: subrole, isSticky: isSticky,
-                          isFloating: isFloating, hasFocus: hasFocus,
-                          isVisible: isVisible)
+                          isMinimized: boolFlag(dict, "is-minimized"),
+                          role: role,
+                          title: title,
+                          hasAXReference: boolFlag(dict, "has-ax-reference"),
+                          subrole: subrole,
+                          isSticky: boolFlag(dict, "is-sticky"),
+                          isFloating: boolFlag(dict, "is-floating"),
+                          hasFocus: boolFlag(dict, "has-focus"),
+                          isVisible: boolFlag(dict, "is-visible"))
+    }
+
+    /// yabai reports its structural flags as `1`/`0` in some builds and as
+    /// JSON booleans in others; a missing or foreign value is false.
+    private static func boolFlag(_ dict: [String: Any], _ key: String) -> Bool {
+        dict[key] as? Int == 1 || dict[key] as? Bool == true
     }
 }
 
