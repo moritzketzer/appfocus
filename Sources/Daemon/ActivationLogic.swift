@@ -146,9 +146,7 @@ final class ActivationLogic {
             // The breaker protects yabai only. Native application activation
             // remains available while the window backend is backing off.
             if job.domain == .window, DispatchTime.now() < hungUntil {
-                action = "DROP \(app ?? "cycle") (yabai unresponsive, backing off)"
-                trace.update { $0.outcome = "dropped-backoff" }
-                recordNow.append(trace)
+                action = dropForBackoff(job, recordNow: &recordNow)
                 return
             }
             let targetChanged = app != nil && runningApp != nil
@@ -156,56 +154,89 @@ final class ActivationLogic {
             let applicationSupersedesWindow = job.domain == .application
                 && runningDomain == .window
             if running, targetChanged || applicationSupersedesWindow {
-                let previousApp = runningApp
-                // Genuine target change: cancel the in-flight command's async
-                // tail (bump token) and run the new jump immediately. Native
-                // activation also supersedes any window job, including cycle.
-                currentToken &+= 1
-                if let cur = runningTrace {
-                    cur.update { $0.outcome = "superseded" }
-                    recordNow.append(cur)
-                }
-                for dropped in pending {
-                    dropped.trace.update { $0.outcome = "superseded" }
-                    recordNow.append(dropped.trace)
-                }
-                pending.removeAll()
-                inFlightTarget = nil
-                runningDomain = job.domain
-                runningApp = app
-                runningTrace = job.trace
-                start = (currentToken, job)
-                action = "SUPERSEDE \(previousApp ?? "cycle")->\(app ?? "cycle") tok=\(currentToken)"
+                action = supersedeRunning(with: job, start: &start,
+                                          recordNow: &recordNow)
             } else if running {
-                // Cap only queued window work. Repeated native activations are
-                // ordered user intent and never participate in the yabai cap.
-                let queuedWindows = pending.indices.filter {
-                    pending[$0].domain == .window
-                }
-                if job.domain == .window,
-                   queuedWindows.count >= self.maxPending,
-                   let evictionIndex = queuedWindows.first {
-                    let evicted = pending.remove(at: evictionIndex)
-                    evicted.trace.update { $0.outcome = "dropped-cap" }
-                    recordNow.append(evicted.trace)
-                    action = "QUEUE \(app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
-                } else {
-                    action = "QUEUE \(app ?? "cycle") behind \(runningApp ?? "cycle") depth=\(pending.count + 1)"
-                }
-                pending.append(job)
+                action = enqueue(job, recordNow: &recordNow)
             } else {
-                running = true
-                currentToken &+= 1
-                runningDomain = job.domain
-                runningApp = app
-                runningTrace = job.trace
-                start = (currentToken, job)
-                action = "START \(app ?? "cycle") tok=\(currentToken)"
+                action = startFresh(job, start: &start)
             }
         }
         Log.debug("pump: \(action)")
         for t in recordNow { verifier.recordImmediate(t) }
         if let (token, job) = start { runJob(token, job) }
+    }
+
+    /// Drop a window command while the breaker is open. Runs inside
+    /// `withPumpTransition`.
+    private func dropForBackoff(_ job: PumpJob,
+                                recordNow: inout [CommandTrace]) -> String {
+        job.trace.update { $0.outcome = "dropped-backoff" }
+        recordNow.append(job.trace)
+        return "DROP \(job.app ?? "cycle") (yabai unresponsive, backing off)"
+    }
+
+    /// Hand the running slot to `job` and discard the queue. Runs inside
+    /// `withPumpTransition`.
+    private func supersedeRunning(with job: PumpJob,
+                                  start: inout (UInt64, PumpJob)?,
+                                  recordNow: inout [CommandTrace]) -> String {
+        let previousApp = runningApp
+        // Genuine target change: cancel the in-flight command's async
+        // tail (bump token) and run the new jump immediately. Native
+        // activation also supersedes any window job, including cycle.
+        currentToken &+= 1
+        if let cur = runningTrace {
+            cur.update { $0.outcome = "superseded" }
+            recordNow.append(cur)
+        }
+        for dropped in pending {
+            dropped.trace.update { $0.outcome = "superseded" }
+            recordNow.append(dropped.trace)
+        }
+        pending.removeAll()
+        inFlightTarget = nil
+        runningDomain = job.domain
+        runningApp = job.app
+        runningTrace = job.trace
+        start = (currentToken, job)
+        return "SUPERSEDE \(previousApp ?? "cycle")->\(job.app ?? "cycle") tok=\(currentToken)"
+    }
+
+    /// Queue `job` behind the running command, evicting the oldest queued
+    /// window work at the cap. Runs inside `withPumpTransition`.
+    private func enqueue(_ job: PumpJob,
+                         recordNow: inout [CommandTrace]) -> String {
+        let action: String
+        // Cap only queued window work. Repeated native activations are
+        // ordered user intent and never participate in the yabai cap.
+        let queuedWindows = pending.indices.filter {
+            pending[$0].domain == .window
+        }
+        if job.domain == .window,
+           queuedWindows.count >= self.maxPending,
+           let evictionIndex = queuedWindows.first {
+            let evicted = pending.remove(at: evictionIndex)
+            evicted.trace.update { $0.outcome = "dropped-cap" }
+            recordNow.append(evicted.trace)
+            action = "QUEUE \(job.app ?? "cycle") (cap: dropped oldest) depth=\(pending.count + 1)"
+        } else {
+            action = "QUEUE \(job.app ?? "cycle") behind \(runningApp ?? "cycle") depth=\(pending.count + 1)"
+        }
+        pending.append(job)
+        return action
+    }
+
+    /// Start `job` on an idle pump. Runs inside `withPumpTransition`.
+    private func startFresh(_ job: PumpJob,
+                            start: inout (UInt64, PumpJob)?) -> String {
+        running = true
+        currentToken &+= 1
+        runningDomain = job.domain
+        runningApp = job.app
+        runningTrace = job.trace
+        start = (currentToken, job)
+        return "START \(job.app ?? "cycle") tok=\(currentToken)"
     }
 
     /// Run one job outside the state lock. Wraps its completion so the pump is
@@ -247,6 +278,28 @@ final class ActivationLogic {
         }
     }
 
+    /// Promote the head of the queue, or park the pump idle when nothing is
+    /// queued. Returns the job to run outside the state lock.
+    ///
+    /// Runs inside `withPumpTransition`. `bumpToken` is for the normal
+    /// completion path, which has not fenced the finishing command yet; the
+    /// abandon paths bump before recording their own outcome.
+    private func advanceToNextOrIdle(bumpToken: Bool) -> (UInt64, PumpJob)? {
+        guard !pending.isEmpty else {
+            running = false
+            runningDomain = nil
+            runningApp = nil
+            runningTrace = nil
+            return nil
+        }
+        let job = pending.removeFirst()
+        if bumpToken { currentToken &+= 1 }
+        runningDomain = job.domain
+        runningApp = job.app
+        runningTrace = job.trace
+        return (currentToken, job)
+    }
+
     /// Release a native activation whose AppKit callback never arrived. This
     /// fences late callbacks and advances queued work without touching yabai's
     /// breaker or retry state.
@@ -261,18 +314,7 @@ final class ActivationLogic {
                 trace.update { $0.outcome = "native-timeout" }
                 verifier.recordImmediate(trace)
             }
-            if pending.isEmpty {
-                running = false
-                runningDomain = nil
-                runningApp = nil
-                runningTrace = nil
-            } else {
-                let job = pending.removeFirst()
-                runningDomain = job.domain
-                runningApp = job.app
-                runningTrace = job.trace
-                next = (currentToken, job)
-            }
+            next = advanceToNextOrIdle(bumpToken: false)
             fired = true
         }
         if fired {
@@ -303,38 +345,11 @@ final class ActivationLogic {
                 timedOut.append(cur)
             }
             let hasNewerIntent = !pending.isEmpty
-            var retainedApplications: [PumpJob] = []
-            for dropped in pending {
-                if dropped.domain == .application {
-                    retainedApplications.append(dropped)
-                } else {
-                    dropped.trace.update {
-                        $0.outcome = "dropped-cap"
-                        $0.detail = "backlog dropped by watchdog"
-                    }
-                    timedOut.append(dropped.trace)
-                }
-            }
-            pending = retainedApplications
+            dropQueuedWindowWork(into: &timedOut)
             hungUntil = DispatchTime.now() + self.hungBackoff
             fired = true
-            if !hasNewerIntent, let f = inFlightTarget, f.token == token {
-                pendingRetry = f.target
-                armed = true
-            }
-            inFlightTarget = nil
-            if pending.isEmpty {
-                running = false
-                runningDomain = nil
-                runningApp = nil
-                runningTrace = nil
-            } else {
-                let job = pending.removeFirst()
-                runningDomain = job.domain
-                runningApp = job.app
-                runningTrace = job.trace
-                next = (currentToken, job)
-            }
+            armed = armPendingRetry(for: token, hasNewerIntent: hasNewerIntent)
+            next = advanceToNextOrIdle(bumpToken: false)
         }
         for t in timedOut { verifier.recordImmediate(t) }
         if fired {
@@ -349,6 +364,39 @@ final class ActivationLogic {
                     onConsumedForTesting: onRetryConsumedForTesting)
             }
         }
+    }
+
+    /// Drop the queued window backlog (yabai is presumed hung) and retain
+    /// queued native work, which never touches yabai. Runs inside
+    /// `withPumpTransition`.
+    private func dropQueuedWindowWork(into timedOut: inout [CommandTrace]) {
+        var retainedApplications: [PumpJob] = []
+        for dropped in pending {
+            if dropped.domain == .application {
+                retainedApplications.append(dropped)
+            } else {
+                dropped.trace.update {
+                    $0.outcome = "dropped-cap"
+                    $0.detail = "backlog dropped by watchdog"
+                }
+                timedOut.append(dropped.trace)
+            }
+        }
+        pending = retainedApplications
+    }
+
+    /// Arm the one-shot retry when the dropped command's focus target was
+    /// already resolved and no newer intent is waiting. Returns whether it
+    /// armed. Runs inside `withPumpTransition`.
+    private func armPendingRetry(for token: UInt64,
+                                 hasNewerIntent: Bool) -> Bool {
+        var armed = false
+        if !hasNewerIntent, let f = inFlightTarget, f.token == token {
+            pendingRetry = f.target
+            armed = true
+        }
+        inFlightTarget = nil
+        return armed
     }
 
     /// Submit the armed retry through the normal pump: re-validate the target
@@ -419,11 +467,7 @@ final class ActivationLogic {
         var completed: CommandTrace?
         withPumpTransition {
             guard token == currentToken else { note = "STALE tok=\(token) cur=\(currentToken)"; return }
-            if domain == .window {
-                // Only a normal window completion proves yabai recovered.
-                hungUntil = DispatchTime.now()
-                if inFlightTarget?.token == token { inFlightTarget = nil }
-            }
+            if domain == .window { noteWindowRecovery(token) }
             completed = runningTrace
             // Hand the completed trace to the verifier INSIDE this critical
             // section: when the pump goes idle, a keypress on another thread
@@ -432,31 +476,36 @@ final class ActivationLogic {
             // reordering that would let a stale verification be attributed
             // mid-next-command. Both verifier calls are non-blocking
             // queue.async wrappers, so no lock-order hazard.
-            if let completed = completed {
-                if completed.currentOutcome == "unknown" {
-                    verifier.verify(completed)
-                } else {
-                    verifier.recordImmediate(completed)
-                }
-            }
-            if pending.isEmpty {
-                running = false
-                runningDomain = nil
-                runningApp = nil
-                runningTrace = nil
-                note = "DONE tok=\(token) idle"
+            handOffCompletedTrace(completed)
+            next = advanceToNextOrIdle(bumpToken: true)
+            if let (nextToken, _) = next {
+                note = "DONE tok=\(token) -> next tok=\(nextToken) depth=\(pending.count)"
             } else {
-                let job = pending.removeFirst()
-                currentToken &+= 1
-                runningDomain = job.domain
-                runningApp = job.app
-                runningTrace = job.trace
-                next = (currentToken, job)
-                note = "DONE tok=\(token) -> next tok=\(currentToken) depth=\(pending.count)"
+                note = "DONE tok=\(token) idle"
             }
         }
         Log.debug("pump: \(note)")
         if let (token, job) = next { runJob(token, job) }
+    }
+
+    /// Only a normal window completion proves yabai recovered. Runs inside
+    /// `withPumpTransition`.
+    private func noteWindowRecovery(_ token: UInt64) {
+        hungUntil = DispatchTime.now()
+        if inFlightTarget?.token == token { inFlightTarget = nil }
+    }
+
+    /// Route a completed trace: an unknown outcome still needs on-screen
+    /// verification, a pre-classified one is recorded as-is. Runs inside
+    /// `withPumpTransition`.
+    private func handOffCompletedTrace(_ completed: CommandTrace?) {
+        if let completed = completed {
+            if completed.currentOutcome == "unknown" {
+                verifier.verify(completed)
+            } else {
+                verifier.recordImmediate(completed)
+            }
+        }
     }
 
     private func isActive(_ token: UInt64) -> Bool {
