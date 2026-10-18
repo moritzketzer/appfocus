@@ -51,27 +51,7 @@ final class DefaultAppLauncher: AppLauncher {
     ) {
         guard let bundleIdentifier else {
             runCommand("/usr/bin/open", ["-a", appName]) { result in
-                switch result {
-                case .success(let status):
-                    let success = status == 0
-                    if success {
-                        Log.info("Activated \(appName) by name")
-                    } else {
-                        Log.error("open -a \(appName) failed (exit \(status))")
-                    }
-                    completion(ApplicationActionResult(
-                        success: success,
-                        path: .legacyName,
-                        bundleIdentifier: nil,
-                        detail: success ? nil : "open -a failed (exit \(status))"))
-                case .failure(let error):
-                    Log.error("open -a \(appName) failed: \(error)")
-                    completion(ApplicationActionResult(
-                        success: false,
-                        path: .legacyName,
-                        bundleIdentifier: nil,
-                        detail: error.localizedDescription))
-                }
+                completion(Self.legacyNameResult(result, appName: appName))
             }
             return
         }
@@ -89,22 +69,9 @@ final class DefaultAppLauncher: AppLauncher {
         }
 
         workspace.openApplication(at: url, activates: true) { result in
-            switch result {
-            case .success:
-                Log.info("Activated \(appName) (\(bundleIdentifier))")
-                completion(ApplicationActionResult(
-                    success: true,
-                    path: .nativeBundle,
-                    bundleIdentifier: bundleIdentifier,
-                    detail: nil))
-            case .failure(let error):
-                Log.error("activate: \(bundleIdentifier) failed: \(error)")
-                completion(ApplicationActionResult(
-                    success: false,
-                    path: .nativeBundle,
-                    bundleIdentifier: bundleIdentifier,
-                    detail: error.localizedDescription))
-            }
+            completion(Self.nativeBundleResult(
+                result, appName: appName,
+                bundleIdentifier: bundleIdentifier))
         }
     }
 
@@ -124,26 +91,95 @@ final class DefaultAppLauncher: AppLauncher {
         }
 
         runCommand("/usr/bin/osascript", ["-e", script]) { result in
-            switch result {
-            case .success(let status):
-                let success = status == 0
-                if !success {
-                    Log.error("osascript reopen failed for \(appName) (exit \(status))")
-                }
-                completion(ApplicationActionResult(
-                    success: success,
-                    path: .reopen,
-                    bundleIdentifier: nil,
-                    detail: success ? nil : "osascript failed (exit \(status))"))
-            case .failure(let error):
-                Log.error("osascript reopen failed for \(appName): \(error)")
-                completion(ApplicationActionResult(
-                    success: false,
-                    path: .reopen,
-                    bundleIdentifier: nil,
-                    detail: error.localizedDescription))
-            }
+            completion(Self.reopenResult(result, appName: appName))
         }
+    }
+
+    /// The `open -a` completion shape.
+    private static func legacyNameResult(
+        _ result: Result<Int32, Error>,
+        appName: String
+    ) -> ApplicationActionResult {
+        switch result {
+        case .success(let status):
+            if status == 0 {
+                Log.info("Activated \(appName) by name")
+            } else {
+                Log.error("open -a \(appName) failed (exit \(status))")
+            }
+            return exitStatusResult(status, path: .legacyName,
+                                    tool: "open -a")
+        case .failure(let error):
+            Log.error("open -a \(appName) failed: \(error)")
+            return errorResult(error, path: .legacyName)
+        }
+    }
+
+    /// The native bundle-identifier completion shape.
+    private static func nativeBundleResult(
+        _ result: Result<ApplicationIdentity, Error>,
+        appName: String,
+        bundleIdentifier: String
+    ) -> ApplicationActionResult {
+        switch result {
+        case .success:
+            Log.info("Activated \(appName) (\(bundleIdentifier))")
+            return ApplicationActionResult(
+                success: true,
+                path: .nativeBundle,
+                bundleIdentifier: bundleIdentifier,
+                detail: nil)
+        case .failure(let error):
+            Log.error("activate: \(bundleIdentifier) failed: \(error)")
+            return errorResult(error, path: .nativeBundle,
+                               bundleIdentifier: bundleIdentifier)
+        }
+    }
+
+    /// The `osascript` reopen completion shape.
+    private static func reopenResult(
+        _ result: Result<Int32, Error>,
+        appName: String
+    ) -> ApplicationActionResult {
+        switch result {
+        case .success(let status):
+            if status != 0 {
+                Log.error("osascript reopen failed for \(appName) (exit \(status))")
+            }
+            return exitStatusResult(status, path: .reopen,
+                                    tool: "osascript")
+        case .failure(let error):
+            Log.error("osascript reopen failed for \(appName): \(error)")
+            return errorResult(error, path: .reopen)
+        }
+    }
+
+    /// A process-backed activation: exit 0 is success, any other status
+    /// carries `tool` and the status as the detail.
+    private static func exitStatusResult(
+        _ status: Int32,
+        path: ApplicationActionPath,
+        tool: String
+    ) -> ApplicationActionResult {
+        let success = status == 0
+        return ApplicationActionResult(
+            success: success,
+            path: path,
+            bundleIdentifier: nil,
+            detail: success ? nil : "\(tool) failed (exit \(status))")
+    }
+
+    /// A spawn or AppKit failure: no exit status, the error describes itself.
+    private static func errorResult(
+        _ error: Error,
+        path: ApplicationActionPath,
+        bundleIdentifier: String? = nil
+    ) -> ApplicationActionResult {
+        ApplicationActionResult(
+            success: false,
+            path: path,
+            bundleIdentifier: bundleIdentifier,
+            detail: error.localizedDescription)
     }
 
     private static func runProcess(
