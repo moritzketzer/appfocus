@@ -512,6 +512,17 @@ final class ActivationLogic {
         return activationQueue.sync { currentToken == token }
     }
 
+    /// The repeated terminal exit of a decision that cannot act: classify the
+    /// trace as failed and release the pump.
+    private func failTrace(_ trace: CommandTrace, _ detail: String,
+                           done: () -> Void) {
+        trace.update {
+            $0.outcome = "failed"
+            $0.detail = detail
+        }
+        done()
+    }
+
     // MARK: - Alias filtering
 
     private func windowsForApp(_ appName: String, from allWindows: [WindowInfo]) -> [WindowInfo] {
@@ -525,16 +536,8 @@ final class ActivationLogic {
         let appName = config.resolveAlias(rawName)
         let trace = CommandTrace(command: "jump", app: appName)
         let bundleIdentifier = config.bundleIdentifier(for: appName)
-        let frontmost = workspace.frontmostApplication
-        let targetIsFrontmost: Bool
-        if let bundleIdentifier {
-            targetIsFrontmost = frontmost?.bundleIdentifier == bundleIdentifier
-        } else {
-            targetIsFrontmost = frontmost?.localizedName.map(config.resolveAlias)
-                == appName
-        }
 
-        if !targetIsFrontmost {
+        if !isFrontmost(appName: appName, bundleIdentifier: bundleIdentifier) {
             trace.update {
                 $0.path = bundleIdentifier == nil
                     ? ApplicationActionPath.legacyName.rawValue
@@ -545,34 +548,55 @@ final class ActivationLogic {
             }
             submit(domain: .application, app: appName,
                    trace: trace) { [self] token, done in
-                Log.info("jump: activating \(appName)")
-                self.launcher.activate(
-                    appName: appName,
-                    bundleIdentifier: bundleIdentifier
-                ) { result in
-                    guard self.isActive(token) else { done(); return }
-                    trace.update {
-                        $0.path = result.path.rawValue
-                        $0.actionedAt = .now()
-                        if !result.success {
-                            $0.outcome = "failed"
-                            $0.detail = result.detail
-                        }
-                    }
-                    done()
-                }
+                self.activateApplication(
+                    appName: appName, bundleIdentifier: bundleIdentifier,
+                    trace: trace, token: token, done: done)
             }
             return
         }
 
         submit(domain: .window, app: appName, trace: trace) { [self] token, done in
-            Log.info("jump: \(appName)")
             self.performJump(appName: appName, trace: trace, token: token, done: done)
+        }
+    }
+
+    /// Does the resolved target already hold the foreground? Bundle identity
+    /// when one is configured, localized name otherwise.
+    private func isFrontmost(appName: String,
+                             bundleIdentifier: String?) -> Bool {
+        let frontmost = workspace.frontmostApplication
+        if let bundleIdentifier {
+            return frontmost?.bundleIdentifier == bundleIdentifier
+        }
+        return frontmost?.localizedName.map(config.resolveAlias) == appName
+    }
+
+    /// The cross-app jump action: native activation, zero yabai calls.
+    private func activateApplication(appName: String,
+                                     bundleIdentifier: String?,
+                                     trace: CommandTrace, token: UInt64,
+                                     done: @escaping () -> Void) {
+        Log.info("jump: activating \(appName)")
+        launcher.activate(
+            appName: appName,
+            bundleIdentifier: bundleIdentifier
+        ) { [self] result in
+            guard isActive(token) else { done(); return }
+            trace.update {
+                $0.path = result.path.rawValue
+                $0.actionedAt = .now()
+                if !result.success {
+                    $0.outcome = "failed"
+                    $0.detail = result.detail
+                }
+            }
+            done()
         }
     }
 
     private func performJump(appName: String, trace: CommandTrace,
                              token: UInt64, done: @escaping () -> Void) {
+        Log.info("jump: \(appName)")
         // Read the model ONCE — no yabai round-trip on the hot path, and no
         // torn read across a concurrent poller rebuild. A stalled
         // WindowServer now only delays the background refresh, never a press.
@@ -619,11 +643,8 @@ final class ActivationLogic {
                 // conflated, and acting on it would reopen a duplicate. Do
                 // nothing; the press is lost, the next one retries.
                 Log.error("jump: confirm query failed for \(appName), not reopening")
-                trace.update {
-                    $0.outcome = "failed"
-                    $0.detail = "confirm query failed"
-                }
-                done(); return
+                self.failTrace(trace, "confirm query failed", done: done)
+                return
             }
             self.model.replaceSnapshot(all)
             let windows = self.windowsForApp(appName, from: all)
@@ -745,26 +766,44 @@ final class ActivationLogic {
         let windowIds = Set(windows.map { $0.id })
 
         if let prevId = state.prevFocusedId, windowIds.contains(prevId) {
-            Log.info("jump: \(appName) MRU switch to window \(prevId)")
-            store.recordFocus(appName: appName, windowId: prevId)
-            if let target = windows.first(where: { $0.id == prevId }) {
-                focusWindow(target, from: focused, trace: trace,
-                            token: token, done: done)
-            } else {
-                trace.update {
-                    $0.outcome = "failed"
-                    $0.detail = "MRU target vanished from window set"
-                }
-                done()
-            }
+            mruSwitch(appName: appName, to: prevId, windows: windows,
+                      focused: focused, trace: trace,
+                      token: token, done: done)
         } else {
-            Log.info("jump: \(appName) no prev window, cycling next")
-            let effectiveId = state.lastFocusedId ?? focused.id
-            cycleWithKnownState(appName: appName, windows: windows,
-                                focusedId: effectiveId, direction: .next,
-                                current: focused, trace: trace,
-                                token: token, done: done)
+            cycleFromMRUMiss(appName: appName, windows: windows, state: state,
+                             focused: focused, trace: trace,
+                             token: token, done: done)
         }
+    }
+
+    /// The double-jump toggle: switch back to the app's previously focused
+    /// window.
+    private func mruSwitch(appName: String, to prevId: Int,
+                           windows: [WindowInfo], focused: WindowInfo,
+                           trace: CommandTrace, token: UInt64,
+                           done: @escaping () -> Void) {
+        Log.info("jump: \(appName) MRU switch to window \(prevId)")
+        store.recordFocus(appName: appName, windowId: prevId)
+        if let target = windows.first(where: { $0.id == prevId }) {
+            focusWindow(target, from: focused, trace: trace,
+                        token: token, done: done)
+        } else {
+            failTrace(trace, "MRU target vanished from window set",
+                      done: done)
+        }
+    }
+
+    /// No previous window to toggle back to: advance the ring instead.
+    private func cycleFromMRUMiss(appName: String, windows: [WindowInfo],
+                                  state: AppState, focused: WindowInfo,
+                                  trace: CommandTrace, token: UInt64,
+                                  done: @escaping () -> Void) {
+        Log.info("jump: \(appName) no prev window, cycling next")
+        let effectiveId = state.lastFocusedId ?? focused.id
+        cycleWithKnownState(appName: appName, windows: windows,
+                            focusedId: effectiveId, direction: .next,
+                            current: focused, trace: trace,
+                            token: token, done: done)
     }
 
     private func focusBestWindow(appName: String, windows: [WindowInfo],
@@ -779,11 +818,8 @@ final class ActivationLogic {
 
         guard let target = target else {
             Log.error("jump: no target window for \(appName)")
-            trace.update {
-                $0.outcome = "failed"
-                $0.detail = "no target window"
-            }
-            done(); return
+            failTrace(trace, "no target window", done: done)
+            return
         }
 
         Log.info("jump: focusing window \(target.id) for \(appName)")
@@ -800,37 +836,7 @@ final class ActivationLogic {
             $0.targetSpace = target.space
             $0.decidedAt = .now()
         }
-        if armRetry {
-            // The focus target is resolved: if the watchdog drops this
-            // command mid-action, the retry can replay exactly this focus.
-            let retry = RetryTarget(appName: config.resolveAlias(target.appName),
-                                    windowId: target.id)
-            activationQueue.sync { inFlightTarget = (token, retry) }
-        }
-        let focusTarget = { [self] in
-            guard isActive(token) else { done(); return }
-            backend.focusWindow(id: target.id) { success in
-                trace.update { $0.actionedAt = .now() }
-                if success {
-                    // Read-your-writes: the next queued command must see the
-                    // settled focus without a query, so bursts compound.
-                    // Deliberately NOT token-gated: the model records the
-                    // last-COMPLETED focus action. A superseded command's
-                    // late-landing success really did move OS focus, so the
-                    // unguarded write tracks reality better than a fenced
-                    // one would; any residual disagreement self-heals at the
-                    // next poll.
-                    self.model.noteFocused(id: target.id)
-                } else {
-                    Log.error("focus: yabai focus failed for window \(target.id)")
-                    trace.update {
-                        $0.outcome = "failed"
-                        $0.detail = "yabai window focus failed"
-                    }
-                }
-                done()
-            }
-        }
+        if armRetry { armRetryTarget(target, token: token) }
 
         // ALWAYS issue the Space switch — the same-Space skip is gone. Three
         // separate live defects came from trusting the model's Space claim
@@ -842,12 +848,35 @@ final class ActivationLogic {
         // chain continues to the window focus either way. Correctness over
         // a micro-optimization. `crossedSpace` still records the MODEL's
         // view for the stats' same/cross split.
+        recordSpaceCrossing(from: current, to: target, trace: trace)
+        switchSpace(for: target, trace: trace, token: token, done: done)
+    }
+
+    /// Record the in-flight command's resolved focus target: if the watchdog
+    /// drops this command mid-action, the retry can replay exactly this focus.
+    private func armRetryTarget(_ target: WindowInfo, token: UInt64) {
+        let retry = RetryTarget(appName: config.resolveAlias(target.appName),
+                                windowId: target.id)
+        activationQueue.sync { inFlightTarget = (token, retry) }
+    }
+
+    /// Label the trace with the MODEL's same/cross-Space view. Never gates
+    /// the Space switch itself.
+    private func recordSpaceCrossing(from current: WindowInfo?,
+                                     to target: WindowInfo,
+                                     trace: CommandTrace) {
         if let current, current.isStandardWindow,
            current.space == target.space {
             trace.update { $0.crossedSpace = false }
         } else {
             trace.update { $0.crossedSpace = true }
         }
+    }
+
+    /// The Space-switch step: issue it unconditionally, then hand off to the
+    /// window-focus step regardless of its result.
+    private func switchSpace(for target: WindowInfo, trace: CommandTrace,
+                             token: UInt64, done: @escaping () -> Void) {
         Log.info("focus: switching to space \(target.space) for window \(target.id)")
         backend.focusSpace(index: target.space) { [self] success in
             guard isActive(token) else { done(); return }
@@ -863,7 +892,35 @@ final class ActivationLogic {
                 // genuine anomalies surface as `invisible` telemetry.
                 Log.info("focus: yabai space focus for \(target.space) failed — continuing to window focus")
             }
-            focusTarget()
+            focusTargetWindow(target, trace: trace, token: token, done: done)
+        }
+    }
+
+    /// The window-focus step: the action that actually moves AX focus.
+    private func focusTargetWindow(_ target: WindowInfo, trace: CommandTrace,
+                                   token: UInt64,
+                                   done: @escaping () -> Void) {
+        guard isActive(token) else { done(); return }
+        backend.focusWindow(id: target.id) { success in
+            trace.update { $0.actionedAt = .now() }
+            if success {
+                // Read-your-writes: the next queued command must see the
+                // settled focus without a query, so bursts compound.
+                // Deliberately NOT token-gated: the model records the
+                // last-COMPLETED focus action. A superseded command's
+                // late-landing success really did move OS focus, so the
+                // unguarded write tracks reality better than a fenced
+                // one would; any residual disagreement self-heals at the
+                // next poll.
+                self.model.noteFocused(id: target.id)
+            } else {
+                Log.error("focus: yabai focus failed for window \(target.id)")
+                trace.update {
+                    $0.outcome = "failed"
+                    $0.detail = "yabai window focus failed"
+                }
+            }
+            done()
         }
     }
 
@@ -911,11 +968,7 @@ final class ActivationLogic {
             focusWindow(target, from: current, trace: trace,
                         token: token, done: done)
         } else {
-            trace.update {
-                $0.outcome = "failed"
-                $0.detail = "ring id \(nextId) not in window set"
-            }
-            done()
+            failTrace(trace, "ring id \(nextId) not in window set", done: done)
         }
     }
 
@@ -943,11 +996,8 @@ final class ActivationLogic {
             snapshot.windows.first(where: { $0.id == id })
         }) else {
             Log.error("cycle: no focused window")
-            trace.update {
-                $0.outcome = "failed"
-                $0.detail = "no focused window in model"
-            }
-            done(); return
+            failTrace(trace, "no focused window in model", done: done)
+            return
         }
 
         let appName = config.resolveAlias(focused.appName)
