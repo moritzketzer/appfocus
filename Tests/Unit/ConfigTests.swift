@@ -99,6 +99,32 @@ struct ConfigTests {
         #expect(config.pollIntervalMs == 500)
     }
 
+    // A partial config must apply what it does say. `backend`/`yabai_path`
+    // used to be required keys, so a file that only set aliases failed to
+    // decode and was discarded whole — the aliases silently did nothing.
+    @Test func aliasesOnlyConfigApplies() throws {
+        let json = """
+        {"aliases":{"Code":"Visual Studio Code"}}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(AppFocusConfig.self, from: json)
+        #expect(config.resolveAlias("Code") == "Visual Studio Code")
+        #expect(config.backend == AppFocusConfig.default.backend)
+        #expect(config.yabaiPath == AppFocusConfig.default.yabaiPath)
+    }
+
+    @Test func emptyConfigDecodesToPureDefaults() throws {
+        let json = "{}".data(using: .utf8)!
+        let config = try JSONDecoder().decode(AppFocusConfig.self, from: json)
+        #expect(config.backend == AppFocusConfig.default.backend)
+        #expect(config.yabaiPath == AppFocusConfig.default.yabaiPath)
+        #expect(config.aliases.isEmpty)
+        #expect(config.bundleIdentifiers.isEmpty)
+        #expect(config.reopenStrategies == ["*": .reopen])
+        #expect(config.pollIntervalMs == 2000)
+        #expect(config.kanataEnabled == true)
+        #expect(config.kanataPort == 7070)
+    }
+
     @Test func configJsonRoundtrip() throws {
         let config = testConfig(
             aliases: ["Code": "Visual Studio Code"],

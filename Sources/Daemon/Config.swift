@@ -72,10 +72,14 @@ struct AppFocusConfig: Codable {
 }
 
 extension AppFocusConfig {
+    // Every field is optional. `backend` and `yabai_path` used to be required,
+    // which made a partial config (aliases only, say) fail to decode and be
+    // discarded whole: the file's actual content was silently ignored while
+    // the log claimed a parse failure.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        backend = try c.decode(String.self, forKey: .backend)
-        yabaiPath = try c.decode(String.self, forKey: .yabaiPath)
+        backend = try c.decodeIfPresent(String.self, forKey: .backend) ?? Self.default.backend
+        yabaiPath = try c.decodeIfPresent(String.self, forKey: .yabaiPath) ?? Self.default.yabaiPath
         aliases = try c.decodeIfPresent([String: String].self, forKey: .aliases) ?? [:]
         reopenStrategies = try c.decodeIfPresent([String: ReopenStrategy].self, forKey: .reopenStrategies) ?? ["*": .reopen]
         bundleIdentifiers = try c.decodeIfPresent([String: String].self, forKey: .bundleIdentifiers) ?? [:]
