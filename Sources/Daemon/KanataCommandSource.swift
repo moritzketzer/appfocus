@@ -32,6 +32,12 @@ final class KanataCommandSource: CommandSource {
     /// Closing here raced that reader — the kernel can recycle the fd number
     /// between the two closes, so the second close lands on whatever
     /// descriptor was opened in the meantime.
+    ///
+    /// Known limitation: `shutdown` cannot unblock a `connect()` still in
+    /// flight — it returns ENOTCONN on a socket that has not connected yet. A
+    /// stop during a blocking connect therefore takes effect at the connect
+    /// timeout or the next loop re-check, which the localhost default makes
+    /// short enough to accept.
     func stop() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -111,6 +117,8 @@ final class KanataCommandSource: CommandSource {
     // MARK: - Connection
 
     private func connectLoop() {
+        // The sleep is not interruptible, so a `stop()` during the backoff
+        // takes effect at this re-check — one interval at the latest.
         while isRunning {
             if tryConnect() {
                 currentRetryInterval = 2.0
@@ -119,8 +127,6 @@ final class KanataCommandSource: CommandSource {
             guard isRunning else { return }
             Log.info("kanata: reconnecting in \(Int(currentRetryInterval))s")
             Thread.sleep(forTimeInterval: currentRetryInterval)
-            // The sleep is not interruptible, so a `stop()` during the backoff
-            // takes effect at this re-check — one interval at the latest.
             currentRetryInterval = min(currentRetryInterval * 2, Self.maxBackoff)
         }
     }

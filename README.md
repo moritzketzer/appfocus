@@ -102,8 +102,9 @@ nix build github:moritzketzer/appfocus
 ## Configuration
 
 All fields are optional: a missing field takes the default below, and a
-partial config applies what it does set. A file that fails to parse as JSON is
-discarded whole, so every default applies.
+partial config applies what it does set. Only a file that fails to decode —
+invalid JSON or a wrong-typed field — is discarded whole, falling back to the
+defaults.
 
 Create `~/.config/appfocus/config.json`:
 
@@ -238,7 +239,7 @@ The command protocol is newline-delimited text over the Unix socket (`jump <app>
 
 ## Tests
 
-204 unit tests cover native activation, verification, job isolation, window navigation, command parsing, the CLI socket source, state persistence, and configuration.
+205 unit tests cover native activation, verification, job isolation, window navigation, command parsing, the CLI socket source, state persistence, and configuration.
 
 ```bash
 make test

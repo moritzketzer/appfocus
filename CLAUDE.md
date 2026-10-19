@@ -144,7 +144,8 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 `~/.config/appfocus/config.json` — every field is optional. A missing field
 takes the default below, so a partial config applies what it does set; only a
-file that fails to parse as JSON is discarded whole:
+file that fails to decode — invalid JSON or a wrong-typed field — is discarded
+whole, falling back to the defaults:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
@@ -159,7 +160,7 @@ file that fails to parse as JSON is discarded whole:
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 204 tests in 16 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 205 tests in 16 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a subset: `make test` builds `.build/tests`, so invoke that binary directly
 with a filter — `.build/tests --filter WindowInfo` matches suite and test names
