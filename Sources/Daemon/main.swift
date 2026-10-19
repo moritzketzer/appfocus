@@ -94,6 +94,11 @@ if config.kanataEnabled {
 // Start focus poller
 poller.start()
 
+// `handleStatus` replies with a raw `write` to the CLI's socket. A client that
+// disconnects before reading it would deliver SIGPIPE and kill the daemon;
+// ignore the signal and let that write fail with EPIPE instead.
+signal(SIGPIPE, SIG_IGN)
+
 // Handle SIGTERM/SIGINT for clean shutdown
 let sigSources: [DispatchSourceSignal] = [SIGTERM, SIGINT].map { sig in
     signal(sig, SIG_IGN)

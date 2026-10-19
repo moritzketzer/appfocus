@@ -1,6 +1,10 @@
 // Sources/CLI/main.swift
 import Foundation
 
+// A piped reader can close stdout early (`appfocus stats | head -c 16`), and
+// the next `print` would then die by SIGPIPE instead of exiting cleanly.
+signal(SIGPIPE, SIG_IGN)
+
 // Parse command line args into a Command
 let args = Array(CommandLine.arguments.dropFirst())
 
