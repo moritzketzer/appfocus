@@ -88,11 +88,27 @@ struct StateStoreTests {
         let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
         let store1 = StateStore(stateDir: dir)
         store1.recordFocus(appName: "Safari", windowId: 42, space: 2)
+        store1.waitForPendingFlushesForTesting()
 
         // New store from same directory — should load from disk
         let store2 = StateStore(stateDir: dir)
         let state = store2.state(for: "Safari")
         #expect(state.lastFocusedId == 42)
         #expect(state.lastFocusedSpace == 2)
+    }
+
+    // Flushes are serialized in commit order, so the file ends up holding the
+    // newest committed value. The old post-unlock flush let an earlier
+    // writer's encode land last and persist state the store had already
+    // superseded.
+    @Test func diskKeepsTheNewestCommittedState() {
+        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
+        let store = StateStore(stateDir: dir)
+        store.update(appName: "Safari") { $0.ring = [1, 2, 3] }
+        store.update(appName: "Safari") { $0.ring = [4, 5, 6] }
+        store.waitForPendingFlushesForTesting()
+
+        let reloaded = StateStore(stateDir: dir)
+        #expect(reloaded.state(for: "Safari").ring == [4, 5, 6])
     }
 }

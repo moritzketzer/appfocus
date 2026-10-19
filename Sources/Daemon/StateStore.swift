@@ -6,6 +6,11 @@ final class StateStore {
     private var lastFocusedApp: String?
     private let stateDir: String
     private let lock = NSLock()
+    /// Serializes disk writes. The flush used to run after `lock.unlock()`, so
+    /// two writers racing on one app could reach the file in the reverse order
+    /// and leave the OLDER state on disk. Enqueueing the committed value under
+    /// the lock makes the write order the commit order.
+    private let flushQueue = DispatchQueue(label: "appfocus.statestore.flush")
 
     init(stateDir: String = SocketPath.stateDir) {
         self.stateDir = stateDir
@@ -31,9 +36,8 @@ final class StateStore {
         var s = states[appName] ?? loadFromDisk(appName: appName)
         mutate(&s)
         states[appName] = s
+        enqueueFlush(appName: appName, state: s)
         lock.unlock()
-
-        flushToDisk(appName: appName, state: s)
     }
 
     /// Record a window focus change. Returns true if state actually changed.
@@ -50,9 +54,9 @@ final class StateStore {
         if let space = space { s.lastFocusedSpace = space }
         states[appName] = s
         lastFocusedApp = appName
+        enqueueFlush(appName: appName, state: s)
         lock.unlock()
 
-        flushToDisk(appName: appName, state: s)
         Log.debug("Focus: \(appName) \(s.prevFocusedId ?? -1) -> \(windowId)")
         return true
     }
@@ -74,6 +78,13 @@ final class StateStore {
         lock.lock()
         defer { lock.unlock() }
         return states[appName]
+    }
+
+    /// Test hook: block until every enqueued flush has reached disk. The
+    /// daemon never waits on the flush queue — writes are write-through for
+    /// the next process, not for the current one.
+    func waitForPendingFlushesForTesting() {
+        flushQueue.sync {}
     }
 
     // MARK: - Disk persistence
@@ -99,6 +110,14 @@ final class StateStore {
             Log.debug("loadFromDisk(\(appName)): \(error)")
             return AppState()
         }
+    }
+
+    /// Queue a write of this exact committed value. Called while holding
+    /// `lock`, so the queue's FIFO order is the in-memory commit order; the
+    /// captured value means the writer never re-reads state that has since
+    /// moved on.
+    private func enqueueFlush(appName: String, state: AppState) {
+        flushQueue.async { self.flushToDisk(appName: appName, state: state) }
     }
 
     private func flushToDisk(appName: String, state: AppState) {
