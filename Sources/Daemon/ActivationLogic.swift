@@ -103,11 +103,28 @@ final class ActivationLogic {
         done()
     }
 
+    /// The focused window of ONE snapshot read. Resolving it from the same
+    /// snapshot the command decides on keeps the read untorn across a
+    /// concurrent poller rebuild.
+    private func focusedWindow(in snapshot: WindowModel) -> WindowInfo? {
+        snapshot.focusedId.flatMap { id in
+            snapshot.windows.first(where: { $0.id == id })
+        }
+    }
+
     // MARK: - Alias filtering
 
     private func windowsForApp(_ appName: String, from allWindows: [WindowInfo]) -> [WindowInfo] {
         allWindows.filter { config.resolveAlias($0.appName) == appName
                             && !$0.isMinimized && $0.isStandardWindow }
+    }
+
+    /// The app's windows that yabai knows about but cannot act on: real
+    /// windows with no AX reference (the ChatGPT lazy-AX state).
+    private func axlessCandidates(_ appName: String,
+                                  from allWindows: [WindowInfo]) -> [WindowInfo] {
+        allWindows.filter { config.resolveAlias($0.appName) == appName
+                            && !$0.isMinimized && $0.isAXlessCandidate }
     }
 
     // MARK: - Jump
@@ -179,17 +196,9 @@ final class ActivationLogic {
         // torn read across a concurrent poller rebuild. A stalled
         // WindowServer now only delays the background refresh, never a press.
         let snapshot = model.snapshot()
-        let focused = snapshot.focusedId.flatMap { id in
-            snapshot.windows.first(where: { $0.id == id })
-        }
+        let focused = focusedWindow(in: snapshot)
 
-        // Record the pre-jump focused window only if it is a real window;
-        // a focused sticky dialog must not pollute MRU state.
-        if let focused = focused, focused.isStandardWindow {
-            let canonical = config.resolveAlias(focused.appName)
-            store.recordFocus(appName: canonical, windowId: focused.id,
-                              space: focused.space)
-        }
+        recordPreJumpFocus(focused)
 
         let windows = windowsForApp(appName, from: snapshot.windows)
         trace.update {
@@ -205,6 +214,18 @@ final class ActivationLogic {
             handleHasWindows(appName: appName, windows: windows,
                              focused: focused, trace: trace,
                              token: token, done: done)
+        }
+    }
+
+    /// Seed the MRU with the window the jump is leaving, so a later
+    /// double-jump can toggle back to it.
+    private func recordPreJumpFocus(_ focused: WindowInfo?) {
+        // Record the pre-jump focused window only if it is a real window;
+        // a focused sticky dialog must not pollute MRU state.
+        if let focused = focused, focused.isStandardWindow {
+            let canonical = config.resolveAlias(focused.appName)
+            store.recordFocus(appName: canonical, windowId: focused.id,
+                              space: focused.space)
         }
     }
 
@@ -227,10 +248,7 @@ final class ActivationLogic {
             self.model.replaceSnapshot(all)
             let windows = self.windowsForApp(appName, from: all)
             if windows.isEmpty {
-                let axless = all.filter {
-                    self.config.resolveAlias($0.appName) == appName
-                        && !$0.isMinimized && $0.isAXlessCandidate
-                }
+                let axless = self.axlessCandidates(appName, from: all)
                 self.handleNoWindows(appName: appName,
                                      axlessCandidates: axless, trace: trace,
                                      token: token, done: done)
@@ -255,20 +273,39 @@ final class ActivationLogic {
         }
 
         if !axlessCandidates.isEmpty {
-            Log.error("jump: \(appName) has \(axlessCandidates.count) window(s) without AX reference — activating natively; tiling needs a warm yabai restart (see gotchas)")
-            trace.update {
-                $0.path = .nativeAxless
-            }
-            launcher.activate(
-                appName: appName,
-                bundleIdentifier: bundleIdentifier
-            ) { [self] result in
-                self.completeApplicationAction(
-                    result, trace: trace, token: token, done: done)
-            }
+            activateAXless(appName: appName,
+                           bundleIdentifier: bundleIdentifier,
+                           candidateCount: axlessCandidates.count,
+                           trace: trace, token: token, done: done)
             return
         }
 
+        reopenApplication(appName: appName, trace: trace,
+                          token: token, done: done)
+    }
+
+    /// The app is running with windows yabai cannot focus: activate it
+    /// natively, with no Space focus and no launch polling.
+    private func activateAXless(appName: String, bundleIdentifier: String?,
+                                candidateCount: Int, trace: CommandTrace,
+                                token: UInt64, done: @escaping () -> Void) {
+        Log.error("jump: \(appName) has \(candidateCount) window(s) without AX reference — activating natively; tiling needs a warm yabai restart (see gotchas)")
+        trace.update {
+            $0.path = .nativeAxless
+        }
+        launcher.activate(
+            appName: appName,
+            bundleIdentifier: bundleIdentifier
+        ) { [self] result in
+            self.completeApplicationAction(
+                result, trace: trace, token: token, done: done)
+        }
+    }
+
+    /// The app is frontmost with no windows at all: run its reopen strategy.
+    private func reopenApplication(appName: String, trace: CommandTrace,
+                                   token: UInt64,
+                                   done: @escaping () -> Void) {
         Log.info("jump: \(appName) frontmost without windows, reopening")
         trace.update { $0.path = .reopen }
         launcher.reopen(
@@ -522,11 +559,7 @@ final class ActivationLogic {
             done(); return
         }
 
-        store.update(appName: appName) { state in
-            state.ring = Self.preserveRingOrder(prevRing: state.ring, windows: windows)
-        }
-
-        let ring = store.state(for: appName).ring
+        let ring = reconcileRing(appName: appName, windows: windows)
         guard ring.count > 1 else {
             trace.update {
                 $0.path = .noop
@@ -536,19 +569,39 @@ final class ActivationLogic {
             done(); return
         }
 
-        let currentIdx = ring.firstIndex(of: focusedId) ?? 0
-        let step = direction == .next ? 1 : -1
-        let nextIdx = (currentIdx + step + ring.count) % ring.count
-        let nextId = ring[nextIdx]
+        let advance = Self.ringAdvance(ring: ring, focusedId: focusedId,
+                                       direction: direction)
 
-        Log.info("cycle: \(currentIdx) -> \(nextIdx) of \(ring.count) (window \(nextId))")
-        store.recordFocus(appName: appName, windowId: nextId)
-        if let target = windows.first(where: { $0.id == nextId }) {
+        Log.info("cycle: \(advance.currentIdx) -> \(advance.nextIdx) of \(ring.count) (window \(advance.nextId))")
+        store.recordFocus(appName: appName, windowId: advance.nextId)
+        if let target = windows.first(where: { $0.id == advance.nextId }) {
             focusWindow(target, from: current, trace: trace,
                         token: token, done: done)
         } else {
-            failTrace(trace, "ring id \(nextId) not in window set", done: done)
+            failTrace(trace, "ring id \(advance.nextId) not in window set",
+                      done: done)
         }
+    }
+
+    /// Reconcile the app's stored ring with the live window set and read the
+    /// result back, so the cycle steps through what the store now holds.
+    private func reconcileRing(appName: String,
+                               windows: [WindowInfo]) -> [Int] {
+        store.update(appName: appName) { state in
+            state.ring = Self.preserveRingOrder(prevRing: state.ring, windows: windows)
+        }
+        return store.state(for: appName).ring
+    }
+
+    /// One ring step: where the focused window sits (position 0 when the ring
+    /// does not contain it), the wrapped next position, and its window id.
+    private static func ringAdvance(
+        ring: [Int], focusedId: Int, direction: CycleDirection
+    ) -> (currentIdx: Int, nextIdx: Int, nextId: Int) {
+        let currentIdx = ring.firstIndex(of: focusedId) ?? 0
+        let step = direction == .next ? 1 : -1
+        let nextIdx = (currentIdx + step + ring.count) % ring.count
+        return (currentIdx, nextIdx, ring[nextIdx])
     }
 
     func cycle(direction: CycleDirection) {
@@ -571,9 +624,7 @@ final class ActivationLogic {
             $0.modelGeneration = snapshot.generation
             $0.modelFocusedId = snapshot.focusedId
         }
-        guard let focused = snapshot.focusedId.flatMap({ id in
-            snapshot.windows.first(where: { $0.id == id })
-        }) else {
+        guard let focused = focusedWindow(in: snapshot) else {
             Log.error("cycle: no focused window")
             failTrace(trace, "no focused window in model", done: done)
             return
