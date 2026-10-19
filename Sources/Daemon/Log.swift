@@ -15,14 +15,19 @@ enum Log {
     }()
     private static func ts() -> String { stamp.string(from: Date()) }
 
+    // Every write goes through the throwing API and discards its error.
+    // Logging must never take the daemon down with it, and the legacy
+    // `FileHandle.write(_:)` raises an ObjC exception Swift cannot catch when
+    // the write fails — which is exactly what EPIPE on a stderr whose
+    // terminal detached does.
     static func error(_ msg: String) {
-        FileHandle.standardError.write(Data("\(ts()) [ERROR] \(msg)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("\(ts()) [ERROR] \(msg)\n".utf8))
     }
     static func info(_ msg: String) {
-        FileHandle.standardError.write(Data("\(ts()) [INFO] \(msg)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("\(ts()) [INFO] \(msg)\n".utf8))
     }
     static func debug(_ msg: String) {
         guard debugEnabled else { return }
-        FileHandle.standardError.write(Data("\(ts()) [DEBUG] \(msg)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("\(ts()) [DEBUG] \(msg)\n".utf8))
     }
 }
