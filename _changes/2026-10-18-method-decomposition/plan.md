@@ -165,6 +165,73 @@ clear branches), `CLI/main.swift` (top-level script), and every report-only
 finding from the round-1 review (Kanata byte-level decode, StateStore flush
 ordering, stop() close race, Log EPIPE).
 
+### Phase 5 — close every open finding (2026-10-19)
+
+Moritz authorized executing ALL previously report-only findings and coverage
+gaps ("mach einfach alles, lass nichts rumliegen"). These are deliberate,
+bounded BEHAVIOR FIXES (unlike phases 1-4); each design is pinned here.
+
+5.1 **Kanata UTF-8 chunk boundary (round-1 M7).** `assembleLines` moves to
+byte level: carry the incomplete tail as `[UInt8]`, split the
+`incomplete + chunk` byte stream on `0x0A`, decode each COMPLETE line with
+`String(bytes:encoding:)` individually — a single undecodable line is
+dropped alone (debug log), and a multi-byte character split across two
+`read()`s now survives in the byte tail instead of killing the whole chunk.
+`readMessages` holds `incompleteMessage` as bytes. Tests: adapt the phase-4
+assembly test mechanically; add one UTF-8-boundary test (an envelope with a
+non-ASCII app name split mid-character across two reads, reassembled and
+parsed) and one invalid-bytes-line-dropped-alone test.
+
+5.2 **StateStore flush ordering (round-1 M8).** `flushToDisk` currently runs
+after `lock.unlock()`, so two concurrent writers for the same app can
+persist stale state (last disk writer wins with older data). Fix: a private
+serial `DispatchQueue` for flushes; `update`/`recordFocus` capture the new
+`AppState` value under the lock and enqueue the write — FIFO makes the disk
+order match the in-memory commit order. Write-through semantics stay (every
+mutation still flushed); `loadFromDisk` unchanged (a pending flush implies
+the app is cached, so first-access loads never race it).
+
+5.3 **Kanata `stop()` close race (round-1 M9).** `stop()` closing `fd` while
+`readMessages` can close the same descriptor risks a recycled-fd
+double-close. Fix: one small lock guards `running`/`fd`; `stop()` sets
+`running = false` and calls `shutdown(fd, SHUT_RDWR)` (unblocks the reader,
+no recycle hazard); `readMessages` remains the SOLE closer and nils `fd`
+under the lock on exit; `connectLoop` reads `running` under the lock.
+
+5.4 **Log crash on dead stderr (round-1 M10).** The legacy
+`FileHandle.write(_:)` raises an ObjC exception on write failure (EPIPE
+after a detached terminal). Replace the three call sites with non-throwing
+writes (`try? …write(contentsOf:)`); telemetry/logging must never kill the
+daemon.
+
+5.5 **Config required-fields trap (round-1 I1, code side).** `backend` and
+`yabai_path` switch to `decodeIfPresent` with the `.default` values, so a
+partial config (e.g. aliases only) applies instead of being discarded
+whole. CLAUDE.md and README Config sections return to an accurate "all
+fields optional". ConfigTests: aliases-only config applies aliases with
+default backend/yabaiPath; `{}` decodes to pure defaults.
+
+5.6 **`retryRunner` loud default (round-1/2 reviewer Minors).** The no-op
+default closure gains one `Log.error` ("retry consumed with no runner
+wired…") so a future wiring regression fails loudly instead of silently
+dropping one-shot retries. Doc contract stays.
+
+5.7 **SocketCommandSource coverage (round-1 coverage note).** New
+`Tests/Unit/SocketCommandSourceTests.swift` (the Makefile glob picks it
+up): (a) start binds and a written command line reaches `commandHandler`;
+(b) `status` routes to `statusHandler`; (c) a stale socket file with no
+listener is removed and start succeeds; (d) a second instance against a
+live socket throws `alreadyRunning`. Use a short per-test temp directory
+for the socket path (`sockaddr_un` length limit).
+
+5.8 **Docs truth pass at the end:** update the CLAUDE.md structure listing
+(new test file), the CLAUDE.md/README test counts to the real final number,
+and the Config sections per 5.5.
+
+Non-goals: CommandPump/pump mechanics (unchanged reasoning from Phase 4),
+CLI, bench, the attended benchmark itself, and the nix-config overlay bump
+(separate repository, prepared separately).
+
 ## Execution contract
 
 - Behavior-preserving only; every changed line traces to this plan.
