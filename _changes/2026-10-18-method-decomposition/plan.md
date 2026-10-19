@@ -105,6 +105,66 @@ byte-identical. `TelemetryStats` stays string-based (it parses arbitrary
 JSONL — a wire-format consumer). Tests asserting outcome strings keep
 passing via rawValues; mechanical test edits only where a type changes.
 
+### Phase 4 — second decomposition pass (2026-10-19)
+
+Requested follow-up round. Targets are the files round 1 deliberately left
+out, plus post-round-1 residuals whose bodies still mix distinct concerns.
+The semantic-distance rule governs; line counts are only the search signal.
+
+4.1 `Common/TelemetryStats.swift` — `aggregate` (~80 lines with nested funcs)
+does parsing/filtering, outcome counting, success rate, latency sections,
+and the failure tail in one body. Promote the nested `percentiles` /
+`latencyLine` helpers to private static methods and extract
+`parseRecords(lines:since:)`, the outcome-count step, the latency section,
+and the failures section as named helpers. The formatted output string must
+stay byte-identical (TelemetryStatsTests drive it with fixture lines).
+
+4.2 `Daemon/YabaiBackend.swift` — `runYabai` (~70 lines) mixes process
+setup, the finish-once latch, the concurrent drain, and timeout/kill
+escalation. Extract process construction, the drain start, and the
+timeout/kill scheduling into private helpers that receive the shared
+`finish` closure. The latch (`finishLock`/`finished`) stays one per
+invocation; every helper runs on the same queue it runs on today; the
+per-call timing log stays inside the finish closure; bodies move verbatim.
+
+4.3 `Daemon/OutcomeVerifier.swift` — `classifyApplication` (~45 code lines)
+mixes notification-identity freshness resolution, the no-identity guard,
+the matched finalization, the deadline wait, and the wrong-window
+finalization: extract the identity resolution and the three trace
+finalizations as named helpers (deadline-wait control flow stays in the
+main method). In `verify()`, extract the pending-replacement + timer-arming
+block. Keep every "Runs on `queue`" comment.
+
+4.4 `Daemon/ActivationLogic.swift` residuals:
+- Dedup: the `snapshot.focusedId.flatMap { … }` focused-window resolution
+  appears in `performJump` and `performCycle` → one private helper taking
+  the snapshot.
+- `performJump`: extract the pre-jump MRU recording block.
+- `confirmNoWindows`: extract the AX-less candidate filter.
+- `handleNoWindows`: extract the two action branches (native AX-less
+  activation; reopen).
+- `cycleWithKnownState`: extract the ring reconciliation (store update +
+  read-back) and the pure next-ring-id step computation (static, like
+  `preserveRingOrder`).
+
+4.5 `Daemon/KanataCommandSource.swift` — extract the chunk/line assembly
+from `readMessages` into a pure static helper
+(`assembleLines(chunkBytes:incomplete:) -> (complete: [String], incomplete: String)`
+or equivalent) with IDENTICAL semantics, including the current
+`String(bytes:encoding:) ?? ""` fallback — the UTF-8 chunk-boundary defect
+stays report-only; this only creates its testable seam. Add one focused
+unit test next to the existing kanata parsing tests (multi-line chunk,
+incomplete tail carried forward).
+
+Phase 4 non-goals, considered and excluded: `CommandPump` and `runJob`
+(independently reviewed this week; bodies are cohesive transitions — reopening
+freshly reviewed concurrency code for line counts violates the
+semantic-distance rule), `CommandTrace.jsonLine` (a serialization table),
+`Types.swift` memberwise init (boilerplate), `AppLauncher.activate` (two
+clear branches), `CLI/main.swift` (top-level script), and every report-only
+finding from the round-1 review (Kanata byte-level decode, StateStore flush
+ordering, stop() close race, Log EPIPE).
+
 ## Execution contract
 
 - Behavior-preserving only; every changed line traces to this plan.
