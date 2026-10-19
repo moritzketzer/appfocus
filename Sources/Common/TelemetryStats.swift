@@ -27,6 +27,32 @@ enum TelemetryStats {
 
     static func aggregate(lines: [String], since: Date? = nil,
                           now: Date = Date()) -> String {
+        let records = parseRecords(lines: lines, since: since)
+        guard !records.isEmpty else { return "No telemetry records in range." }
+
+        let decided = records.filter {
+            !undecidedOutcomes.contains($0["outcome"] as? String ?? "")
+        }
+        let successes = decided.filter {
+            successOutcomes.contains($0["outcome"] as? String ?? "")
+        }
+        let rate = decided.isEmpty ? 0
+            : Double(successes.count) / Double(decided.count) * 100
+
+        var out: [String] = []
+        out.append("Telemetry: \(records.count) records\(since != nil ? " in range" : "")")
+        out.append(String(format: "Success rate: %.1f%% (%d/%d decided)",
+                          rate, successes.count, decided.count))
+        out.append(contentsOf: outcomesSection(records))
+        out.append(contentsOf: latencySection(decided))
+        out.append(contentsOf: failuresSection(records))
+        return out.joined(separator: "\n")
+    }
+
+    /// Decode the JSONL lines, dropping unparseable ones and — when `since`
+    /// is set — every record older than it.
+    private static func parseRecords(lines: [String],
+                                     since: Date?) -> [[String: Any]] {
         let isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -40,46 +66,28 @@ enum TelemetryStats {
             }
             records.append(obj)
         }
-        guard !records.isEmpty else { return "No telemetry records in range." }
+        return records
+    }
 
+    /// Every outcome seen, most frequent first.
+    private static func outcomesSection(_ records: [[String: Any]]) -> [String] {
         var outcomeCounts: [String: Int] = [:]
         for r in records {
             let o = r["outcome"] as? String ?? "unknown"
             outcomeCounts[o, default: 0] += 1
         }
 
-        let decided = records.filter {
-            !undecidedOutcomes.contains($0["outcome"] as? String ?? "")
-        }
-        let successes = decided.filter {
-            successOutcomes.contains($0["outcome"] as? String ?? "")
-        }
-        let rate = decided.isEmpty ? 0
-            : Double(successes.count) / Double(decided.count) * 100
-
-        func percentiles(_ values: [Int]) -> (p50: Int, p95: Int)? {
-            guard !values.isEmpty else { return nil }
-            let sorted = values.sorted()
-            let p50 = sorted[(sorted.count - 1) / 2]
-            let p95 = sorted[min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
-            return (p50, p95)
-        }
-
-        func latencyLine(_ label: String, _ subset: [[String: Any]]) -> String {
-            let totals = subset.compactMap { $0["total_ms"] as? Int }
-            guard let p = percentiles(totals) else { return "  \(label): n=0" }
-            return "  \(label): n=\(totals.count) p50=\(p.p50)ms p95=\(p.p95)ms"
-        }
-
-        var out: [String] = []
-        out.append("Telemetry: \(records.count) records\(since != nil ? " in range" : "")")
-        out.append(String(format: "Success rate: %.1f%% (%d/%d decided)",
-                          rate, successes.count, decided.count))
-        out.append("Outcomes:")
+        var out: [String] = ["Outcomes:"]
         for (outcome, count) in outcomeCounts.sorted(by: { $0.value > $1.value }) {
             out.append("  \(outcome): \(count)")
         }
-        out.append("Latency (total press→action):")
+        return out
+    }
+
+    /// Press-to-action latency, split by path and by Space crossing. Only
+    /// decided records carry a latency worth reading.
+    private static func latencySection(_ decided: [[String: Any]]) -> [String] {
+        var out: [String] = ["Latency (total press→action):"]
         out.append(latencyLine("hot path      ", decided.filter { $0["path"] as? String == "hot" }))
         out.append(latencyLine("confirm path  ", decided.filter { $0["path"] as? String == "confirm" }))
         out.append(latencyLine("other paths   ", decided.filter {
@@ -88,22 +96,40 @@ enum TelemetryStats {
         }))
         out.append(latencyLine("same-Space    ", decided.filter { ($0["crossed_space"] as? Bool) == false }))
         out.append(latencyLine("cross-Space   ", decided.filter { ($0["crossed_space"] as? Bool) == true }))
+        return out
+    }
 
+    /// The forensic tail: the last 10 decided records that did not succeed.
+    private static func failuresSection(_ records: [[String: Any]]) -> [String] {
         let failures = records.filter {
             let o = $0["outcome"] as? String ?? ""
             return !successOutcomes.contains(o) && !undecidedOutcomes.contains(o)
         }
-        if !failures.isEmpty {
-            out.append("Last \(min(10, failures.count)) non-ok records:")
-            for r in failures.suffix(10) {
-                let ts = r["ts"] as? String ?? "?"
-                let cmd = r["cmd"] as? String ?? "?"
-                let app = r["app"] as? String ?? "-"
-                let o = r["outcome"] as? String ?? "?"
-                let d = r["detail"] as? String ?? ""
-                out.append("  \(ts) \(cmd) \(app): \(o)\(d.isEmpty ? "" : " — \(d)")")
-            }
+        guard !failures.isEmpty else { return [] }
+
+        var out: [String] = ["Last \(min(10, failures.count)) non-ok records:"]
+        for r in failures.suffix(10) {
+            let ts = r["ts"] as? String ?? "?"
+            let cmd = r["cmd"] as? String ?? "?"
+            let app = r["app"] as? String ?? "-"
+            let o = r["outcome"] as? String ?? "?"
+            let d = r["detail"] as? String ?? ""
+            out.append("  \(ts) \(cmd) \(app): \(o)\(d.isEmpty ? "" : " — \(d)")")
         }
-        return out.joined(separator: "\n")
+        return out
+    }
+
+    private static func percentiles(_ values: [Int]) -> (p50: Int, p95: Int)? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let p50 = sorted[(sorted.count - 1) / 2]
+        let p95 = sorted[min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+        return (p50, p95)
+    }
+
+    private static func latencyLine(_ label: String, _ subset: [[String: Any]]) -> String {
+        let totals = subset.compactMap { $0["total_ms"] as? Int }
+        guard let p = percentiles(totals) else { return "  \(label): n=0" }
+        return "  \(label): n=\(totals.count) p50=\(p.p50)ms p95=\(p.p95)ms"
     }
 }
