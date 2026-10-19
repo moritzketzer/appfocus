@@ -5,14 +5,18 @@ import Testing
 // `sockaddr_un.sun_path` holds ~104 bytes and the process temp directory can
 // eat most of that on its own, so these tests bind under /tmp and remove the
 // directory they made.
-private func makeSocketDir() -> String {
+private func makeSocketDir() throws -> String {
     var template = Array("/tmp/appfocus-sockXXXXXX".utf8CString)
     let made = template.withUnsafeMutableBufferPointer { buf in
         mkdtemp(buf.baseAddress!) != nil
     }
-    guard made else { return "/tmp/appfocus-sock-\(getpid())" }
+    try #require(made, "mkdtemp under /tmp failed: \(String(cString: strerror(errno)))")
     let bytes = template.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
     return String(decoding: bytes, as: UTF8.self)
+}
+
+private func removeSocketDir(_ dir: String) {
+    try? FileManager.default.removeItem(atPath: dir)
 }
 
 private func makeSource(
@@ -23,11 +27,6 @@ private func makeSource(
     SocketCommandSource(path: path,
                         commandHandler: commandHandler,
                         statusHandler: statusHandler)
-}
-
-private func tearDown(_ source: SocketCommandSource, dir: String) {
-    source.stop()
-    try? FileManager.default.removeItem(atPath: dir)
 }
 
 /// Write one wire line through a real client connection, like the CLI does.
@@ -45,7 +44,8 @@ private func sendLine(_ line: String, to path: String) -> Bool {
 struct SocketCommandSourceTests {
 
     @Test func startBindsAndDeliversACommand() throws {
-        let dir = makeSocketDir()
+        let dir = try makeSocketDir()
+        defer { removeSocketDir(dir) }
         let path = dir + "/d.sock"
         let delivered = DispatchSemaphore(value: 0)
         var seen: Command?
@@ -55,7 +55,7 @@ struct SocketCommandSourceTests {
             delivered.signal()
         })
         try source.start()
-        defer { tearDown(source, dir: dir) }
+        defer { source.stop() }
 
         #expect(sendLine("jump Safari\n", to: path))
         // Generous budget: the accept and the read run on separate queues, so
@@ -65,7 +65,8 @@ struct SocketCommandSourceTests {
     }
 
     @Test func statusRoutesToTheStatusHandler() throws {
-        let dir = makeSocketDir()
+        let dir = try makeSocketDir()
+        defer { removeSocketDir(dir) }
         let path = dir + "/d.sock"
         let asked = DispatchSemaphore(value: 0)
 
@@ -76,7 +77,7 @@ struct SocketCommandSourceTests {
             },
             statusHandler: { _ in asked.signal() })
         try source.start()
-        defer { tearDown(source, dir: dir) }
+        defer { source.stop() }
 
         #expect(sendLine("status\n", to: path))
         #expect(asked.wait(timeout: .now() + 10) == .success)
@@ -86,7 +87,8 @@ struct SocketCommandSourceTests {
     // Refusing to start on that file would need a manual `rm` after every
     // crash, so an unconnectable socket is removed and rebound.
     @Test func staleSocketFileIsReplaced() throws {
-        let dir = makeSocketDir()
+        let dir = try makeSocketDir()
+        defer { removeSocketDir(dir) }
         let path = dir + "/d.sock"
         let orphan = SocketPath.bindUnix(path: path)
         #expect(orphan >= 0)
@@ -97,7 +99,7 @@ struct SocketCommandSourceTests {
         let source = makeSource(path: path,
                                 commandHandler: { _ in delivered.signal() })
         try source.start()
-        defer { tearDown(source, dir: dir) }
+        defer { source.stop() }
 
         #expect(sendLine("next\n", to: path))
         #expect(delivered.wait(timeout: .now() + 10) == .success)
@@ -106,11 +108,12 @@ struct SocketCommandSourceTests {
     // A LIVE socket is the opposite case: a second daemon must not steal the
     // path from the one that is still serving it.
     @Test func secondInstanceOnALiveSocketRefusesToStart() throws {
-        let dir = makeSocketDir()
+        let dir = try makeSocketDir()
+        defer { removeSocketDir(dir) }
         let path = dir + "/d.sock"
         let first = makeSource(path: path)
         try first.start()
-        defer { tearDown(first, dir: dir) }
+        defer { first.stop() }
 
         let second = makeSource(path: path)
         do {
