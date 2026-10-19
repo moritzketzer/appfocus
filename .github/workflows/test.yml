@@ -18,5 +18,6 @@ jobs:
       - name: Build
         run: make all
 
+      # Serial on shared runners because parallel-suite GCD starvation times out event waits (observed 2026-09-21 and 2026-10-19).
       - name: Test
-        run: make test
+        run: make test-serial

@@ -21,7 +21,7 @@ TESTFLAGS  := -parse-as-library \
 
 PREFIX ?= /usr/local
 
-.PHONY: all clean install test
+.PHONY: all clean install test test-serial
 
 all: .build/appfocusd .build/appfocus
 
@@ -39,6 +39,9 @@ all: .build/appfocusd .build/appfocus
 
 test: .build/tests
 	.build/tests
+
+test-serial: .build/tests
+	.build/tests --no-parallel
 
 clean:
 	rm -rf .build
