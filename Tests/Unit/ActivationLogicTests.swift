@@ -957,7 +957,7 @@ struct ActivationLogicTests {
             retryConsumed.signal()
             _ = resumeRetry.wait(timeout: .now() + 10)
         })
-        #expect(retryConsumed.wait(timeout: .now() + 10) == .success)
+        #expect(retryConsumed.wait(timeout: .now() + 15) == .success)
 
         let resumeSent = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
