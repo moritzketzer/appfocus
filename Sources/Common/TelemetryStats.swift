@@ -50,7 +50,7 @@ enum TelemetryStats {
     }
 
     /// Decode the JSONL lines, dropping unparseable ones and — when `since`
-    /// is set — every record older than it.
+    /// is set — every record without a parseable `ts` at or after it.
     private static func parseRecords(lines: [String],
                                      since: Date?) -> [[String: Any]] {
         let isoFormatter = ISO8601DateFormatter()

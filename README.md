@@ -238,7 +238,7 @@ The command protocol is newline-delimited text over the Unix socket (`jump <app>
 
 ## Tests
 
-194 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
+195 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
 
 ```bash
 make test

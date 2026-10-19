@@ -158,7 +158,7 @@ decode and is discarded whole, so every default below applies:
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 194 tests in 15 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 195 tests in 15 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a subset: `make test` builds `.build/tests`, so invoke that binary directly
 with a filter — `.build/tests --filter WindowInfo` matches suite and test names
