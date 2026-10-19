@@ -101,9 +101,9 @@ nix build github:moritzketzer/appfocus
 
 ## Configuration
 
-`backend` and `yabai_path` are required; every other field is optional. A
-config file missing either one fails to decode and is discarded whole, so the
-defaults below apply.
+All fields are optional: a missing field takes the default below, and a
+partial config applies what it does set. A file that fails to parse as JSON is
+discarded whole, so every default applies.
 
 Create `~/.config/appfocus/config.json`:
 
@@ -238,7 +238,7 @@ The command protocol is newline-delimited text over the Unix socket (`jump <app>
 
 ## Tests
 
-195 unit tests cover native activation, verification, job isolation, window navigation, command parsing, state persistence, and configuration.
+204 unit tests cover native activation, verification, job isolation, window navigation, command parsing, the CLI socket source, state persistence, and configuration.
 
 ```bash
 make test

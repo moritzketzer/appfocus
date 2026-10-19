@@ -54,6 +54,7 @@ Tests/
     KanataParsingTests.swift
     OutcomeVerifierTests.swift
     ReconcileRingTests.swift
+    SocketCommandSourceTests.swift
     StateStoreTests.swift
     TelemetryStatsTests.swift
     WindowInfoTests.swift
@@ -141,9 +142,9 @@ not "verified" until the benchmark passes — unit tests alone don't count.
 
 ## Config
 
-`~/.config/appfocus/config.json` — `backend` and `yabai_path` are required,
-every other field is optional. A config file missing either one fails to
-decode and is discarded whole, so every default below applies:
+`~/.config/appfocus/config.json` — every field is optional. A missing field
+takes the default below, so a partial config applies what it does set; only a
+file that fails to parse as JSON is discarded whole:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
@@ -158,7 +159,7 @@ decode and is discarded whole, so every default below applies:
 
 ## Testing
 
-Uses Swift Testing framework (not XCTest). The suite currently runs 195 tests in 15 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
+Uses Swift Testing framework (not XCTest). The suite currently runs 204 tests in 16 suites. Mocks in `Tests/Unit/Mocks.swift` implement `WindowBackend`, `AppLauncher`, `ApplicationWorkspace`, and `OutcomeVerifying` with configurable results and call tracking.
 
 Run a subset: `make test` builds `.build/tests`, so invoke that binary directly
 with a filter — `.build/tests --filter WindowInfo` matches suite and test names
