@@ -6,8 +6,8 @@ let args = Array(CommandLine.arguments.dropFirst())
 
 // Every stderr write below goes through the throwing API and discards its
 // error, like `Log`: the legacy `FileHandle.write(_:)` raises an ObjC
-// exception Swift cannot catch when the write fails — EPIPE on a closed
-// stderr (`appfocus status | head`) would abort instead of printing.
+// exception Swift cannot catch when the write fails — a diagnostic on a
+// closed stderr would abort the process instead of exiting cleanly.
 guard !args.isEmpty else {
     try? FileHandle.standardError.write(
         contentsOf: Data("Usage: appfocus <jump APP|next|prev|status|stats [--since 2h]>\n".utf8))

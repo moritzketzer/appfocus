@@ -99,8 +99,7 @@ struct StateStoreTests {
 
     // Pins the captured-value plumbing, not the old race: two updates from
     // one thread were ordered under the post-unlock flush too. What this does
-    // catch is a flush that re-reads `states[appName]` instead of writing the
-    // value it was handed, and a queue that loses the second write entirely.
+    // catch is a queue that loses the second write entirely.
     @Test func diskKeepsTheNewestCommittedState() {
         let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
         let store = StateStore(stateDir: dir)

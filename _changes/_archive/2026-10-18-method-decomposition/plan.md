@@ -1,9 +1,25 @@
 # Method-Decomposition Refactor — Plan
 
-Status: plan-only (no spec: behavior-preserving refactor, no design decisions
-that change observable behavior). Reviewer: Fable session. Executor: Opus
-subagent. Baseline: origin/main @ 8045139, `make test` green (192 tests,
-15 suites, ~10 s).
+Status: archived as built (2026-10-19). Reviewer: Fable session. Executors:
+Opus subagents. Baseline: origin/main @ 8045139, `make test` green (192
+tests, 15 suites, ~10 s).
+
+## As built (2026-10-19)
+
+All five phases executed as planned; final suite 205 tests / 16 suites,
+`make all` warning-free. ActivationLogic 938 → ~670 lines with the pump in
+CommandPump.swift (~495); trace path/outcome typed; every round-1
+report-only finding closed in Phase 5 (kanata byte-level assembly, state
+flush ordering + shutdown drain, sole-closer socket lifecycle, non-throwing
+logging daemon+CLI, optional config fields, loud retry-runner default,
+SocketCommandSource suite). Review evidence: three independent whole-change
+reviews (pump fidelity, whole diff, breadth) plus two delta reviews
+(Phase 4, Phase 5), each with verified closure of Important findings.
+Known residuals, deliberately out of scope: WindowModelTests'
+DispatchTime tick-resolution flake (pre-existing, documented 2026-08-16;
+a fix needs clock injection), the CLI's stdout SIGPIPE class, and the
+deploy gate — the attended benchmark plus the nix-config overlay bump
+remain the activation steps.
 
 ## Diagnosis (Fowler smell audit, prioritized)
 
