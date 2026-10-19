@@ -112,18 +112,24 @@ final class OutcomeVerifier: OutcomeVerifying {
                 self.write(trace)
                 return
             }
-            if let replaced = self.pending {
-                replaced.update { $0.outcome = .unverifiedBurst }
-                self.write(replaced)
-            }
-            self.pending = trace
-            self.pendingGeneration = generation
-            self.pendingEligibleAt = .now() + self.delay
-            guard !self.timerArmed else { return }
-            self.timerArmed = true
-            self.queue.asyncAfter(deadline: self.pendingEligibleAt) {
-                self.fire()
-            }
+            self.makePending(trace, generation: generation)
+        }
+    }
+
+    // Runs on `queue`. Take over as the pending trace — finalizing the one
+    // it replaces — and arm the verification timer unless one is in flight.
+    private func makePending(_ trace: CommandTrace, generation: UInt64) {
+        if let replaced = pending {
+            replaced.update { $0.outcome = .unverifiedBurst }
+            write(replaced)
+        }
+        pending = trace
+        pendingGeneration = generation
+        pendingEligibleAt = .now() + delay
+        guard !timerArmed else { return }
+        timerArmed = true
+        queue.asyncAfter(deadline: pendingEligibleAt) {
+            self.fire()
         }
     }
 
@@ -220,33 +226,18 @@ final class OutcomeVerifier: OutcomeVerifying {
         target: VerificationTarget
     ) -> Bool {
         let now = DispatchTime.now()
-        let notificationIdentity: ApplicationIdentity?
-        if let lastActivation,
-           lastActivation.observedAt.uptimeNanoseconds
-               >= target.evidenceAfter.uptimeNanoseconds {
-            notificationIdentity = lastActivation.identity
-        } else {
-            notificationIdentity = nil
-        }
+        let notificationIdentity = freshActivationIdentity(
+            after: target.evidenceAfter)
 
         guard target.bundleIdentifier != nil || target.app != nil else {
-            trace.update { t in
-                t.verifyMs = 0
-                t.outcome = .unverifiedQueryfail
-                t.detail = appendDetail(t.detail,
-                    "no application target identity")
-            }
+            finalizeWithoutIdentity(trace)
             return true
         }
 
         let frontmost = workspace.frontmostApplication
         if applicationMatches(frontmost, target: target)
             || applicationMatches(notificationIdentity, target: target) {
-            trace.update { t in
-                t.verifyMs = elapsedMilliseconds(
-                    from: target.evidenceAfter, to: now)
-                t.outcome = .okApp
-            }
+            finalizeApplicationMatch(trace, target: target, now: now)
             return true
         }
 
@@ -256,7 +247,39 @@ final class OutcomeVerifier: OutcomeVerifying {
             return false
         }
 
-        let actual = frontmost ?? notificationIdentity
+        finalizeWrongApplication(trace, target: target,
+                                 actual: frontmost ?? notificationIdentity,
+                                 now: now)
+        return true
+    }
+
+    // Runs on `queue`. The trace names neither a bundle nor an app: there is
+    // nothing to compare the foreground against.
+    private func finalizeWithoutIdentity(_ trace: CommandTrace) {
+        trace.update { t in
+            t.verifyMs = 0
+            t.outcome = .unverifiedQueryfail
+            t.detail = appendDetail(t.detail,
+                "no application target identity")
+        }
+    }
+
+    // Runs on `queue`. The intended application holds the foreground.
+    private func finalizeApplicationMatch(_ trace: CommandTrace,
+                                          target: VerificationTarget,
+                                          now: DispatchTime) {
+        trace.update { t in
+            t.verifyMs = elapsedMilliseconds(
+                from: target.evidenceAfter, to: now)
+            t.outcome = .okApp
+        }
+    }
+
+    // Runs on `queue`. The deadline passed with someone else in front.
+    private func finalizeWrongApplication(_ trace: CommandTrace,
+                                          target: VerificationTarget,
+                                          actual: ApplicationIdentity?,
+                                          now: DispatchTime) {
         trace.update { t in
             t.verifyMs = elapsedMilliseconds(
                 from: target.evidenceAfter, to: now)
@@ -266,7 +289,17 @@ final class OutcomeVerifier: OutcomeVerifying {
             } ?? "none"
             t.detail = appendDetail(t.detail, "actual=\(identity)")
         }
-        return true
+    }
+
+    // Runs on `queue`. The last observed activation, but only when the
+    // notification arrived after the action it would be evidence for.
+    private func freshActivationIdentity(
+        after evidenceAfter: DispatchTime
+    ) -> ApplicationIdentity? {
+        guard let lastActivation,
+              lastActivation.observedAt.uptimeNanoseconds
+                  >= evidenceAfter.uptimeNanoseconds else { return nil }
+        return lastActivation.identity
     }
 
     private func applicationMatches(
