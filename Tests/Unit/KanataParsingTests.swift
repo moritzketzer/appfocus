@@ -93,9 +93,9 @@ struct KanataParsingTests {
             + #"{"MessagePush":{"message":"next"}}"# + "\n"
             + #"{"MessagePush":{"mess"#
         let firstRead = KanataCommandSource.assembleLines(
-            chunkBytes: Array(first.utf8)[...], incomplete: "")
+            chunkBytes: Array(first.utf8)[...], incomplete: [])
         #expect(firstRead.complete.count == 2)
-        #expect(firstRead.incomplete == #"{"MessagePush":{"mess"#)
+        #expect(firstRead.incomplete == Array(#"{"MessagePush":{"mess"#.utf8))
         switch KanataCommandSource.parseMessage(firstRead.complete[0]) {
         case .jump(let name): #expect(name == "Safari")
         default: Issue.record("Expected .jump from the first complete line")
@@ -106,10 +106,50 @@ struct KanataParsingTests {
             chunkBytes: Array(second.utf8)[...],
             incomplete: firstRead.incomplete)
         #expect(secondRead.complete.count == 1)
-        #expect(secondRead.incomplete == "")
+        #expect(secondRead.incomplete.isEmpty)
         switch KanataCommandSource.parseMessage(secondRead.complete[0]) {
         case .prev: break
         default: Issue.record("Expected .prev from the carried tail")
+        }
+    }
+
+    // A read boundary can fall INSIDE a multi-byte UTF-8 character. Decoding
+    // the raw chunk would fail there, so the tail has to be carried as bytes:
+    // a String tail cannot express half a character and the whole envelope
+    // (the press) was lost.
+    @Test func assembleLinesSurvivesMultiByteCharacterSplitAcrossReads() {
+        let envelope = #"{"MessagePush":{"message":"jump Köln"}}"# + "\n"
+        let bytes = Array(envelope.utf8)
+        // 0xC3 is the lead byte of "ö"; the first read ends on it.
+        let leadIndex = bytes.firstIndex(of: 0xC3) ?? 0
+        let first = KanataCommandSource.assembleLines(
+            chunkBytes: bytes[0...leadIndex], incomplete: [])
+        #expect(first.complete.isEmpty)
+
+        let second = KanataCommandSource.assembleLines(
+            chunkBytes: bytes[(leadIndex + 1)...], incomplete: first.incomplete)
+        #expect(second.complete.count == 1)
+        switch KanataCommandSource.parseMessage(second.complete.first ?? "") {
+        case .jump(let name): #expect(name == "Köln")
+        default: Issue.record("Expected .jump reassembled across the split character")
+        }
+    }
+
+    // Garbage on the wire must cost exactly its own line: decoding the chunk
+    // as one unit threw away every envelope that shared the read.
+    @Test func assembleLinesDropsOnlyTheUndecodableLine() {
+        var bytes = Array(#"{"MessagePush":{"message":"jump "#.utf8)
+        bytes.append(0xFF)  // never valid UTF-8
+        bytes.append(contentsOf: Array(#""}}"#.utf8))
+        bytes.append(0x0A)
+        bytes.append(contentsOf: Array((#"{"MessagePush":{"message":"next"}}"# + "\n").utf8))
+
+        let assembled = KanataCommandSource.assembleLines(
+            chunkBytes: bytes[...], incomplete: [])
+        #expect(assembled.complete.count == 1)
+        switch KanataCommandSource.parseMessage(assembled.complete.first ?? "") {
+        case .next: break
+        default: Issue.record("The valid line must survive its undecodable neighbour")
         }
     }
 }

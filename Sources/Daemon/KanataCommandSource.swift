@@ -53,17 +53,27 @@ final class KanataCommandSource: CommandSource {
 
     /// Assemble one socket read into newline-complete messages plus the tail
     /// to carry into the next read. `incomplete` is the previous read's tail.
-    /// The decode keeps the existing `?? ""` fallback: a chunk that is not
-    /// valid UTF-8 on its own (a multi-byte sequence split across the read
-    /// boundary) is dropped rather than buffered.
+    /// Both stay at BYTE level: a read boundary can fall inside a multi-byte
+    /// UTF-8 character, which a String tail cannot hold — decoding the chunk
+    /// as one unit dropped that whole read (the press). Each complete line is
+    /// decoded on its own, so undecodable bytes cost exactly their own line.
     static func assembleLines(
-        chunkBytes: ArraySlice<UInt8>, incomplete: String
-    ) -> (complete: [String], incomplete: String) {
-        let chunk = incomplete + (String(bytes: chunkBytes, encoding: .utf8) ?? "")
-        let lines = chunk.split(separator: "\n", omittingEmptySubsequences: false)
+        chunkBytes: ArraySlice<UInt8>, incomplete: [UInt8]
+    ) -> (complete: [String], incomplete: [UInt8]) {
+        let stream = incomplete + chunkBytes
+        let lines = stream.split(separator: 0x0A, omittingEmptySubsequences: false)
+
+        var complete: [String] = []
+        for line in lines.dropLast() {
+            guard let decoded = String(bytes: line, encoding: .utf8) else {
+                Log.debug("kanata: dropped \(line.count)-byte line, not valid UTF-8")
+                continue
+            }
+            complete.append(decoded)
+        }
 
         // Last element may be incomplete — save as incompleteMessage
-        return (lines.dropLast().map(String.init), String(lines.last ?? ""))
+        return (complete, lines.last.map(Array.init) ?? [])
     }
 
     // MARK: - Connection
@@ -109,7 +119,7 @@ final class KanataCommandSource: CommandSource {
 
     private func readMessages() {
         var buffer = [UInt8](repeating: 0, count: 8192)
-        var incompleteMessage = ""
+        var incompleteMessage: [UInt8] = []
 
         while running {
             let n = read(fd, &buffer, buffer.count)
