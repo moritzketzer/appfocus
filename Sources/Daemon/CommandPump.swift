@@ -11,9 +11,12 @@ final class CommandPump {
     /// Replays the focus action of a watchdog-dropped command. Set by the
     /// owner after construction, because it closes over the owner — set once,
     /// before the first submit, and never reassigned: a reassignment racing a
-    /// retry fire is a data race. Left unwired, consumed retries vanish
-    /// silently.
-    var retryRunner: (RetryTarget) -> Void = { _ in }
+    /// retry fire is a data race. Left unwired, the default drops the consumed
+    /// retry loudly, so a wiring regression shows up in the log instead of
+    /// quietly costing the user that press.
+    var retryRunner: (RetryTarget) -> Void = { target in
+        Log.error("pump: retry consumed with no runner wired — dropped replay of \(target.appName ?? "cycle") win=\(target.windowId)")
+    }
 
     /// Serial queue guarding the command pump's mutable state
     /// (`currentToken`, `running`, `runningApp`, `pending`).
