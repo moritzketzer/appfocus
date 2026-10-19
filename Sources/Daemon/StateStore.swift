@@ -80,10 +80,11 @@ final class StateStore {
         return states[appName]
     }
 
-    /// Test hook: block until every enqueued flush has reached disk. The
-    /// daemon never waits on the flush queue — writes are write-through for
-    /// the next process, not for the current one.
-    func waitForPendingFlushesForTesting() {
+    /// Block until every enqueued flush has reached disk. Two callers: the
+    /// shutdown handler, so a signal cannot drop queued writes, and tests that
+    /// read the files back. Normal operation never waits on the flush queue —
+    /// writes are write-through for the next process, not for the current one.
+    func drainPendingFlushes() {
         flushQueue.sync {}
     }
 

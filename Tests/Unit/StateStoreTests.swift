@@ -88,7 +88,7 @@ struct StateStoreTests {
         let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
         let store1 = StateStore(stateDir: dir)
         store1.recordFocus(appName: "Safari", windowId: 42, space: 2)
-        store1.waitForPendingFlushesForTesting()
+        store1.drainPendingFlushes()
 
         // New store from same directory — should load from disk
         let store2 = StateStore(stateDir: dir)
@@ -106,7 +106,7 @@ struct StateStoreTests {
         let store = StateStore(stateDir: dir)
         store.update(appName: "Safari") { $0.ring = [1, 2, 3] }
         store.update(appName: "Safari") { $0.ring = [4, 5, 6] }
-        store.waitForPendingFlushesForTesting()
+        store.drainPendingFlushes()
 
         let reloaded = StateStore(stateDir: dir)
         #expect(reloaded.state(for: "Safari").ring == [4, 5, 6])

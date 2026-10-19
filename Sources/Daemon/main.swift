@@ -103,6 +103,10 @@ let sigSources: [DispatchSourceSignal] = [SIGTERM, SIGINT].map { sig in
         socketSource.stop()
         kanataSource?.stop()
         poller.stop()
+        // Flushes are async since the ordering fix, so `exit` would drop the
+        // queue — drain last, with every source stopped and nothing left to
+        // enqueue behind it.
+        store.drainPendingFlushes()
         exit(0)
     }
     src.resume()

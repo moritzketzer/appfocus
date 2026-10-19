@@ -4,9 +4,13 @@ import Foundation
 // Parse command line args into a Command
 let args = Array(CommandLine.arguments.dropFirst())
 
+// Every stderr write below goes through the throwing API and discards its
+// error, like `Log`: the legacy `FileHandle.write(_:)` raises an ObjC
+// exception Swift cannot catch when the write fails — EPIPE on a closed
+// stderr (`appfocus status | head`) would abort instead of printing.
 guard !args.isEmpty else {
-    FileHandle.standardError.write(
-        Data("Usage: appfocus <jump APP|next|prev|status|stats [--since 2h]>\n".utf8))
+    try? FileHandle.standardError.write(
+        contentsOf: Data("Usage: appfocus <jump APP|next|prev|status|stats [--since 2h]>\n".utf8))
     exit(1)
 }
 
@@ -15,8 +19,8 @@ if args[0] == "stats" {
     var since: Date?
     if let idx = args.firstIndex(of: "--since"), idx + 1 < args.count {
         guard let interval = TelemetryStats.parseSince(args[idx + 1]) else {
-            FileHandle.standardError.write(
-                Data("Invalid --since (use e.g. 30m, 2h, 1d)\n".utf8))
+            try? FileHandle.standardError.write(
+                contentsOf: Data("Invalid --since (use e.g. 30m, 2h, 1d)\n".utf8))
             exit(1)
         }
         since = Date().addingTimeInterval(-interval)
@@ -34,16 +38,16 @@ if args[0] == "stats" {
 
 let line = args.joined(separator: " ")
 guard let cmd = Command.parse(line) else {
-    FileHandle.standardError.write(
-        Data("Unknown command: \(line)\n".utf8))
+    try? FileHandle.standardError.write(
+        contentsOf: Data("Unknown command: \(line)\n".utf8))
     exit(1)
 }
 
 // Connect to daemon socket
 let fd = SocketPath.connectUnix(path: SocketPath.socketPath)
 guard fd >= 0 else {
-    FileHandle.standardError.write(
-        Data("Cannot connect to appfocusd (is it running?)\n".utf8))
+    try? FileHandle.standardError.write(
+        contentsOf: Data("Cannot connect to appfocusd (is it running?)\n".utf8))
     exit(1)
 }
 
