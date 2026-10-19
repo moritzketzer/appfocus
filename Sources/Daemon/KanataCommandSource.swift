@@ -6,6 +6,9 @@ final class KanataCommandSource: CommandSource {
     private let port: Int
     private let commandHandler: (Command) -> Void
     private let queue = DispatchQueue(label: "appfocus.kanata")
+    /// Guards `running` and `fd`: `stop()` runs on the caller's thread while
+    /// the reader is parked in `read()` on `queue`.
+    private let stateLock = NSLock()
     private var fd: Int32 = -1
     private var running = false
     private var currentRetryInterval: Double = 2.0
@@ -18,12 +21,41 @@ final class KanataCommandSource: CommandSource {
     }
 
     func start() throws {
+        stateLock.lock()
         running = true
+        stateLock.unlock()
         queue.async { self.connectLoop() }
     }
 
+    /// Stop the loop WITHOUT closing the descriptor: `shutdown` unblocks the
+    /// reader parked in `read()` and `readMessages` stays its sole closer.
+    /// Closing here raced that reader — the kernel can recycle the fd number
+    /// between the two closes, so the second close lands on whatever
+    /// descriptor was opened in the meantime.
     func stop() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         running = false
+        if fd >= 0 { shutdown(fd, SHUT_RDWR) }
+    }
+
+    private var isRunning: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running
+    }
+
+    private var currentFd: Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return fd
+    }
+
+    /// Close the descriptor and forget it. Only the owner of the read loop
+    /// (or `tryConnect`, before a reader exists) may call this — see `stop()`.
+    private func closeDescriptor() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         if fd >= 0 {
             close(fd)
             fd = -1
@@ -79,21 +111,26 @@ final class KanataCommandSource: CommandSource {
     // MARK: - Connection
 
     private func connectLoop() {
-        while running {
+        while isRunning {
             if tryConnect() {
                 currentRetryInterval = 2.0
                 readMessages()
             }
-            guard running else { return }
+            guard isRunning else { return }
             Log.info("kanata: reconnecting in \(Int(currentRetryInterval))s")
             Thread.sleep(forTimeInterval: currentRetryInterval)
+            // The sleep is not interruptible, so a `stop()` during the backoff
+            // takes effect at this re-check — one interval at the latest.
             currentRetryInterval = min(currentRetryInterval * 2, Self.maxBackoff)
         }
     }
 
     private func tryConnect() -> Bool {
-        fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        stateLock.lock()
+        fd = sock
+        stateLock.unlock()
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
@@ -102,13 +139,12 @@ final class KanataCommandSource: CommandSource {
 
         let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
 
         if result != 0 {
-            close(fd)
-            fd = -1
+            closeDescriptor()
             Log.debug("kanata: connect to \(host):\(port) failed")
             return false
         }
@@ -118,15 +154,16 @@ final class KanataCommandSource: CommandSource {
     }
 
     private func readMessages() {
+        // Every exit path closes here — peer close, read error, or a `stop()`
+        // that shut the descriptor down underneath this loop.
+        defer { closeDescriptor() }
         var buffer = [UInt8](repeating: 0, count: 8192)
         var incompleteMessage: [UInt8] = []
 
-        while running {
-            let n = read(fd, &buffer, buffer.count)
+        while isRunning {
+            let n = read(currentFd, &buffer, buffer.count)
             if n <= 0 {
                 Log.info("kanata: connection closed")
-                close(fd)
-                fd = -1
                 return
             }
 
