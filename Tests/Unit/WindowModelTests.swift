@@ -98,7 +98,14 @@ struct WindowModelTests {
         // truth (e.g. the user clicked elsewhere) — it must win.
         let store = WindowModelStore()
         store.noteFocused(id: 2)
-        let queryStart = DispatchTime.now()
+        // The >= tie rule is deliberate (see WindowModel.swift): on a shared
+        // tick the optimistic update wins. This test is about the strictly
+        // later query, so force the next tick before stamping the query start.
+        let afterOptimistic = DispatchTime.now()
+        var queryStart = DispatchTime.now()
+        while queryStart.uptimeNanoseconds <= afterOptimistic.uptimeNanoseconds {
+            queryStart = DispatchTime.now()
+        }
         store.replaceSnapshot([win(1, hasFocus: true), win(2)],
                               queryStartedAt: queryStart)
         #expect(store.focusedWindow?.id == 1)
