@@ -51,6 +51,21 @@ final class KanataCommandSource: CommandSource {
         return Command.parse(message)
     }
 
+    /// Assemble one socket read into newline-complete messages plus the tail
+    /// to carry into the next read. `incomplete` is the previous read's tail.
+    /// The decode keeps the existing `?? ""` fallback: a chunk that is not
+    /// valid UTF-8 on its own (a multi-byte sequence split across the read
+    /// boundary) is dropped rather than buffered.
+    static func assembleLines(
+        chunkBytes: ArraySlice<UInt8>, incomplete: String
+    ) -> (complete: [String], incomplete: String) {
+        let chunk = incomplete + (String(bytes: chunkBytes, encoding: .utf8) ?? "")
+        let lines = chunk.split(separator: "\n", omittingEmptySubsequences: false)
+
+        // Last element may be incomplete — save as incompleteMessage
+        return (lines.dropLast().map(String.init), String(lines.last ?? ""))
+    }
+
     // MARK: - Connection
 
     private func connectLoop() {
@@ -105,14 +120,11 @@ final class KanataCommandSource: CommandSource {
                 return
             }
 
-            let chunk = incompleteMessage + (String(bytes: buffer[0..<n], encoding: .utf8) ?? "")
-            let lines = chunk.split(separator: "\n", omittingEmptySubsequences: false)
+            let assembled = Self.assembleLines(chunkBytes: buffer[0..<n],
+                                               incomplete: incompleteMessage)
+            incompleteMessage = assembled.incomplete
 
-            // Last element may be incomplete — save as incompleteMessage
-            incompleteMessage = String(lines.last ?? "")
-            let completeLines = lines.dropLast()
-
-            for line in completeLines {
+            for line in assembled.complete {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.isEmpty else { continue }
                 if let cmd = Self.parseMessage(trimmed) {
