@@ -892,9 +892,15 @@ struct ActivationLogicTests {
 
         h.logic.jump(appName: "Safari")   // resolves target 1, focus hangs
         h.settle(ms: 100_000)
-        h.logic.fireWatchdogNowForTesting()
-        // GCD timers drift by seconds under parallel-suite load: poll for
-        // the retry instead of sleeping a fixed interval.
+        // GCD timers drift by seconds under parallel-suite load: wait on the
+        // retry-consumption callback instead of polling for the resubmission.
+        // It fires immediately before the replay runs synchronously through
+        // the pump, so the poll below only covers that synchronous tail.
+        let retryConsumed = DispatchSemaphore(value: 0)
+        h.logic.fireWatchdogNowForTesting(onRetryConsumed: {
+            retryConsumed.signal()
+        })
+        #expect(retryConsumed.wait(timeout: .now() + 15) == .success)
         for _ in 0..<200 where h.backend.focusedWindowIds.count < 2 { usleep(20_000) }
 
         // The retry replays the focus action for the SAME window once.
