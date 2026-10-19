@@ -97,10 +97,10 @@ struct StateStoreTests {
         #expect(state.lastFocusedSpace == 2)
     }
 
-    // Flushes are serialized in commit order, so the file ends up holding the
-    // newest committed value. The old post-unlock flush let an earlier
-    // writer's encode land last and persist state the store had already
-    // superseded.
+    // Pins the captured-value plumbing, not the old race: two updates from
+    // one thread were ordered under the post-unlock flush too. What this does
+    // catch is a flush that re-reads `states[appName]` instead of writing the
+    // value it was handed, and a queue that loses the second write entirely.
     @Test func diskKeepsTheNewestCommittedState() {
         let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
         let store = StateStore(stateDir: dir)
@@ -110,5 +110,51 @@ struct StateStoreTests {
 
         let reloaded = StateStore(stateDir: dir)
         #expect(reloaded.state(for: "Safari").ring == [4, 5, 6])
+    }
+
+    // Four threads mutating ONE app, then one assertion: once every writer
+    // joined, the file holds exactly what memory holds. Only that post-join
+    // state is checked — never an intermediate order — so correct code is
+    // deterministically green.
+    //
+    // One-sided, and measured as weak: against the reconstructed post-unlock
+    // flush this stayed green over 18 runs (also at 16 writers × 50 updates),
+    // and only went red once a randomized delay was injected between unlock
+    // and write — disk 149 against memory 549, an inversion the assertion
+    // does catch. So read a green run as no evidence about the race, and a red
+    // one as proof the commit-order plumbing broke. What it pins in CI is that
+    // concurrent writers cannot lose or cross the final write.
+    @Test func concurrentWritersToOneAppAgreeWithDisk() {
+        let dir = NSTemporaryDirectory() + "appfocus-test-\(UUID().uuidString)"
+        let store = StateStore(stateDir: dir)
+
+        // Dedicated threads, not `DispatchQueue.global()`: the deadline-driven
+        // ActivationLogic tests run in parallel with this one and share that
+        // pool, and four writers parked in it skewed their timing.
+        let writers = DispatchGroup()
+        for worker in 0..<4 {
+            writers.enter()
+            let writer = Thread {
+                defer { writers.leave() }
+                for i in 0..<25 {
+                    // Distinguishable per writer and per iteration, so a stale
+                    // write is a value no later commit could have produced.
+                    let value = worker * 100 + i
+                    store.update(appName: "Safari") {
+                        $0.lastFocusedId = value
+                        $0.ring = [value]
+                    }
+                }
+            }
+            writer.start()
+        }
+        writers.wait()
+        store.drainPendingFlushes()
+
+        let committed = store.state(for: "Safari")
+        let reloaded = StateStore(stateDir: dir)
+        let onDisk = reloaded.state(for: "Safari")
+        #expect(onDisk.lastFocusedId == committed.lastFocusedId)
+        #expect(onDisk.ring == committed.ring)
     }
 }
